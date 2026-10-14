@@ -1,0 +1,8 @@
+# Datos personales (base de datos y fotos): no se suben al repo
+data/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.vscode/
