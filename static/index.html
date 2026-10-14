@@ -3,25 +3,34 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#0f1115">
   <title>Macros</title>
+  <meta name="theme-color" content="#0b0d12">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Macros">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" type="image/svg+xml" href="/static/icons/icon.svg">
+  <link rel="apple-touch-icon" href="/static/icons/icon-180.png">
   <link rel="stylesheet" href="/static/style.css">
+  <script>
+    // Aplica el tema antes de pintar para evitar el parpadeo. Por defecto: oscuro.
+    (function () {
+      var t = localStorage.getItem("theme") || "dark";
+      var dark = t === "dark" || (t === "auto" && matchMedia("(prefers-color-scheme: dark)").matches);
+      document.documentElement.dataset.theme = dark ? "dark" : "light";
+    })();
+  </script>
 </head>
 <body>
+  <nav id="tabs"></nav>
   <main id="view"></main>
 
-  <nav id="tabs">
-    <button data-tab="today" class="active"><span>🍽️</span>Hoy</button>
-    <button data-tab="presets"><span>⚡</span>Presets</button>
-    <button data-tab="foods"><span>🥑</span>Alimentos</button>
-    <button data-tab="history"><span>📊</span>Histórico</button>
-  </nav>
-
-  <div id="modal" class="hidden">
-    <div class="sheet" id="sheet"></div>
-  </div>
+  <div id="modal" class="hidden"><div class="sheet" id="sheet"></div></div>
   <div id="toast" class="hidden"></div>
 
+  <script src="/static/icons.js"></script>
+  <script src="/static/charts.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

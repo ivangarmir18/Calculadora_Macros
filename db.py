@@ -1,8 +1,12 @@
 """Capa de base de datos SQLite (sin ORM, sin dependencias extra)."""
+import os
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent / "data" / "macros.db"
+# Carpeta de datos configurable (MACROS_DATA_DIR) para poder moverla, p. ej. a un disco compartido.
+DATA_DIR = Path(os.environ.get("MACROS_DATA_DIR") or Path(__file__).resolve().parent / "data")
+DB_PATH = DATA_DIR / "macros.db"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS foods (
@@ -16,6 +20,7 @@ CREATE TABLE IF NOT EXISTS foods (
     unit_g    REAL,                       -- peso de 1 unidad (ej. huevo = 60 g), opcional
     unit_name TEXT DEFAULT '',            -- "huevo", "scoop"...
     photo     TEXT DEFAULT '',            -- nombre de fichero en data/uploads
+    barcode   TEXT DEFAULT '',
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -50,6 +55,11 @@ CREATE TABLE IF NOT EXISTS entries (
 );
 CREATE INDEX IF NOT EXISTS idx_entries_date ON entries(date);
 
+CREATE TABLE IF NOT EXISTS weights (
+    date TEXT PRIMARY KEY,               -- YYYY-MM-DD
+    kg   REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -79,17 +89,34 @@ SEED_FOODS = [
 ]
 
 
+@contextmanager
 def get_conn():
+    """Abre una conexión, hace commit al salir y SIEMPRE la cierra
+    (en Windows una conexión abierta bloquea el fichero .db)."""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+    try:
+        yield conn
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def table_columns(conn, table):
+    return [r["name"] for r in conn.execute(f"PRAGMA table_info({table})")]
 
 
 def init_db():
     with get_conn() as conn:
         conn.executescript(SCHEMA)
+        # Migración para bases creadas con la primera versión
+        if "barcode" not in table_columns(conn, "foods"):
+            conn.execute("ALTER TABLE foods ADD COLUMN barcode TEXT DEFAULT ''")
         for k, v in DEFAULT_SETTINGS.items():
             conn.execute("INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)", (k, v))
         if conn.execute("SELECT COUNT(*) FROM foods").fetchone()[0] == 0:

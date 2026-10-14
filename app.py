@@ -1,22 +1,53 @@
 """Calculadora de macros: backend Flask + SQLite.
 
-Ejecutar:  python app.py   ->  http://localhost:5000
+Ejecutar:  python app.py            (accesible desde el móvil en la misma wifi)
+           python app.py --local    (solo este PC)
+Ver `python app.py --help`.
 """
+import argparse
+import base64
+import csv
+import hashlib
+import hmac
+import io
+import json
+import os
+import re
+import secrets
+import socket
+import threading
+import time
 import uuid
+import webbrowser
 from datetime import date, datetime
 from pathlib import Path
 
-from flask import Flask, abort, jsonify, request, send_from_directory
+from flask import Flask, Response, abort, jsonify, make_response, request, send_from_directory
 
+import db
+import gemini
+import off
 from db import get_conn, init_db
 
-BASE = Path(__file__).parent
-UPLOADS = BASE / "data" / "uploads"
+try:  # opcional: solo para el código QR de "conectar el móvil"
+    import qrcode
+    import qrcode.image.svg
+except ImportError:  # pragma: no cover
+    qrcode = None
+
+BASE = Path(__file__).resolve().parent
 ALLOWED_EXT = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 MEALS = ["desayuno", "comida", "merienda", "cena", "otro"]
+PROFILE_KEYS = ("sex", "age", "height", "weight", "activity", "goal")
+EXPORT_TABLES = ["foods", "presets", "preset_items", "entries", "weights"]
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
-app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024  # fotos de hasta 8 MB
+app.config["MAX_CONTENT_LENGTH"] = 60 * 1024 * 1024  # copias de seguridad con fotos
+app.json.ensure_ascii = False
+
+
+def uploads_dir():
+    return db.DB_PATH.parent / "uploads"
 
 
 # ---------------------------------------------------------------- utilidades
@@ -61,14 +92,22 @@ def totals(entries):
     return {k: round(v, 1) for k, v in t.items()}
 
 
+def get_setting(conn, key, default=""):
+    r = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    return r["value"] if r else default
+
+
+def set_setting(conn, key, value):
+    conn.execute("INSERT INTO settings(key,value) VALUES (?,?) "
+                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, str(value)))
+
+
 def get_goals(conn):
-    s = {r["key"]: r["value"] for r in conn.execute("SELECT * FROM settings")}
-    return {
-        "kcal": float(s["goal_kcal"]),
-        "protein": float(s["goal_protein"]),
-        "carbs": float(s["goal_carbs"]),
-        "fat": float(s["goal_fat"]),
-    }
+    return {k: float(get_setting(conn, f"goal_{k}", "0")) for k in ("kcal", "protein", "carbs", "fat")}
+
+
+def clean_meal(m):
+    return m if m in MEALS else "otro"
 
 
 def insert_food_entry(conn, day, meal, food_id, grams):
@@ -86,8 +125,93 @@ def insert_food_entry(conn, day, meal, food_id, grams):
     return cur.lastrowid
 
 
-def clean_meal(m):
-    return m if m in MEALS else "otro"
+def copy_entry_row(conn, e, day, meal=None):
+    conn.execute(
+        "INSERT INTO entries(date,time,meal,kind,name,grams,kcal,protein,carbs,fat,food_id) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (day, datetime.now().strftime("%H:%M"), meal or e["meal"], e["kind"], e["name"], e["grams"],
+         e["kcal"], e["protein"], e["carbs"], e["fat"], e["food_id"]))
+
+
+# ------------------------------------------------------------------ acceso (PIN opcional)
+def hash_pin(pin, salt=None):
+    salt = salt or secrets.token_bytes(16)
+    h = hashlib.pbkdf2_hmac("sha256", pin.encode(), salt, 120_000)
+    return salt.hex() + "$" + h.hex()
+
+
+def check_pin(stored, pin):
+    try:
+        salt_hex, _ = stored.split("$")
+        return hmac.compare_digest(hash_pin(pin, bytes.fromhex(salt_hex)), stored)
+    except ValueError:
+        return False
+
+
+def is_authed(conn):
+    if not get_setting(conn, "pin_hash"):
+        return True
+    tok = get_setting(conn, "auth_token")
+    return bool(tok) and hmac.compare_digest(request.cookies.get("auth", ""), tok)
+
+
+def set_auth_cookie(resp, token):
+    resp.set_cookie("auth", token, max_age=60 * 60 * 24 * 365, httponly=True, samesite="Lax")
+    return resp
+
+
+OPEN_PATHS = ("/", "/manifest.webmanifest", "/sw.js")
+
+
+@app.before_request
+def guard():
+    p = request.path
+    if p in OPEN_PATHS or p.startswith("/static/") or p.startswith("/api/auth/"):
+        return None
+    with get_conn() as conn:
+        if is_authed(conn):
+            return None
+    return jsonify(error="Acceso protegido"), 401
+
+
+@app.get("/api/auth/status")
+def auth_status():
+    with get_conn() as conn:
+        return jsonify(pin_set=bool(get_setting(conn, "pin_hash")), authed=is_authed(conn))
+
+
+@app.post("/api/auth/login")
+def auth_login():
+    pin = str((request.get_json(force=True) or {}).get("pin", ""))
+    with get_conn() as conn:
+        stored = get_setting(conn, "pin_hash")
+        if stored and not check_pin(stored, pin):
+            time.sleep(1)  # frena la fuerza bruta
+            abort(401, "PIN incorrecto")
+        resp = make_response(jsonify(ok=True))
+        return set_auth_cookie(resp, get_setting(conn, "auth_token")) if stored else resp
+
+
+@app.post("/api/auth/pin")
+def auth_set_pin():
+    """Pone, cambia o quita (pin vacío) el PIN. Si ya hay uno hay que dar el actual."""
+    d = request.get_json(force=True) or {}
+    new = str(d.get("pin", "")).strip()
+    with get_conn() as conn:
+        stored = get_setting(conn, "pin_hash")
+        if stored and not check_pin(stored, str(d.get("current", ""))):
+            time.sleep(1)
+            abort(401, "PIN actual incorrecto")
+        if not new:
+            set_setting(conn, "pin_hash", "")
+            set_setting(conn, "auth_token", "")
+            return jsonify(ok=True, pin_set=False)
+        if len(new) < 4:
+            abort(400, "El PIN debe tener al menos 4 caracteres")
+        token = secrets.token_urlsafe(32)
+        set_setting(conn, "pin_hash", hash_pin(new))
+        set_setting(conn, "auth_token", token)
+        return set_auth_cookie(make_response(jsonify(ok=True, pin_set=True)), token)
 
 
 # ------------------------------------------------------------------- páginas
@@ -96,15 +220,34 @@ def index():
     return send_from_directory(app.static_folder, "index.html")
 
 
+@app.get("/manifest.webmanifest")
+def manifest():
+    return send_from_directory(app.static_folder, "manifest.webmanifest", mimetype="application/manifest+json")
+
+
+@app.get("/sw.js")
+def service_worker():  # en la raíz para que su alcance sea toda la app
+    r = send_from_directory(app.static_folder, "sw.js", mimetype="text/javascript")
+    r.headers["Cache-Control"] = "no-cache"
+    return r
+
+
 @app.get("/uploads/<path:filename>")
 def uploads(filename):
-    return send_from_directory(UPLOADS, filename)
+    return send_from_directory(uploads_dir(), filename)
 
 
 @app.errorhandler(400)
+@app.errorhandler(401)
 @app.errorhandler(404)
+@app.errorhandler(502)
 def json_error(e):
     return jsonify(error=e.description), e.code
+
+
+@app.errorhandler(413)
+def too_big(e):
+    return jsonify(error="Archivo demasiado grande"), 413
 
 
 # --------------------------------------------------------------------- día
@@ -114,11 +257,6 @@ def get_day(day):
     with get_conn() as conn:
         entries = rows(conn.execute("SELECT * FROM entries WHERE date=? ORDER BY time, id", (day,)))
         return jsonify(date=day, entries=entries, totals=totals(entries), goals=get_goals(conn))
-
-
-@app.get("/api/today")
-def today():
-    return jsonify(date=date.today().isoformat())
 
 
 # ----------------------------------------------------------------- entradas
@@ -159,6 +297,33 @@ def add_preset_entries():
     return jsonify(ok=True), 201
 
 
+@app.post("/api/entries/copy")
+def copy_entries():
+    """Copia entradas de un día a otro (opcionalmente solo una comida): 'repetir ayer'."""
+    d = request.get_json(force=True)
+    src, dst = valid_date(d.get("from_date")), valid_date(d.get("to_date"))
+    sql, params = "SELECT * FROM entries WHERE date=?", [src]
+    if d.get("meal"):
+        sql += " AND meal=?"
+        params.append(d["meal"])
+    with get_conn() as conn:
+        found = conn.execute(sql + " ORDER BY time, id", params).fetchall()
+        for e in found:
+            copy_entry_row(conn, e, dst)
+    return jsonify(copied=len(found)), 201
+
+
+@app.post("/api/entries/<int:eid>/copy")
+def copy_one_entry(eid):
+    d = request.get_json(force=True)
+    with get_conn() as conn:
+        e = conn.execute("SELECT * FROM entries WHERE id=?", (eid,)).fetchone()
+        if not e:
+            abort(404, "Entrada no encontrada")
+        copy_entry_row(conn, e, valid_date(d.get("date")), clean_meal(d.get("meal") or e["meal"]))
+    return jsonify(ok=True), 201
+
+
 @app.put("/api/entries/<int:eid>")
 def update_entry(eid):
     d = request.get_json(force=True)
@@ -194,7 +359,10 @@ def delete_entry(eid):
 # ----------------------------------------------------------------- histórico
 @app.get("/api/history")
 def history():
-    days = min(int(request.args.get("days", 30)), 365)
+    try:
+        days = max(1, min(int(request.args.get("days", 30)), 365))
+    except ValueError:
+        abort(400, "days no válido")
     with get_conn() as conn:
         data = rows(conn.execute(
             "SELECT date, ROUND(SUM(kcal),1) kcal, ROUND(SUM(protein),1) protein, "
@@ -207,20 +375,57 @@ def history():
         return jsonify(days=data, average=avg, logged_days=len(data), goals=get_goals(conn))
 
 
+# --------------------------------------------------------------------- peso
+@app.get("/api/weights")
+def list_weights():
+    with get_conn() as conn:
+        return jsonify(rows(conn.execute("SELECT * FROM weights ORDER BY date")))
+
+
+@app.post("/api/weights")
+def put_weight():
+    d = request.get_json(force=True)
+    kg = num(d.get("kg"))
+    if not 20 <= kg <= 400:
+        abort(400, "Peso no válido")
+    day = valid_date(d.get("date") or date.today().isoformat())
+    with get_conn() as conn:
+        conn.execute("INSERT INTO weights(date,kg) VALUES (?,?) ON CONFLICT(date) DO UPDATE SET kg=excluded.kg",
+                     (day, kg))
+    return jsonify(ok=True), 201
+
+
+@app.delete("/api/weights/<day>")
+def delete_weight(day):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM weights WHERE date=?", (valid_date(day),))
+    return jsonify(ok=True)
+
+
 # ---------------------------------------------------------------- alimentos
+def save_photo_bytes(data, ext):
+    uploads_dir().mkdir(parents=True, exist_ok=True)
+    name = f"{uuid.uuid4().hex}{ext}"
+    (uploads_dir() / name).write_bytes(data)
+    return name
+
+
 def food_payload(d):
     name = (d.get("name") or "").strip()
     if not name:
         abort(400, "El nombre es obligatorio")
-    unit_g = num(d.get("unit_g"), None)
     return (name, (d.get("brand") or "").strip(), num(d.get("kcal")), num(d.get("protein")),
-            num(d.get("carbs")), num(d.get("fat")), unit_g, (d.get("unit_name") or "").strip())
+            num(d.get("carbs")), num(d.get("fat")), num(d.get("unit_g"), None),
+            (d.get("unit_name") or "").strip(), re.sub(r"\D", "", str(d.get("barcode") or "")))
+
+
+FOOD_COLS = "name,brand,kcal,protein,carbs,fat,unit_g,unit_name,barcode"
 
 
 @app.get("/api/foods")
 def list_foods():
     q = (request.args.get("q") or "").strip()
-    sql = ("SELECT f.*, (SELECT COUNT(*) FROM entries e WHERE e.food_id=f.id) uses FROM foods f ")
+    sql = "SELECT f.*, (SELECT COUNT(*) FROM entries e WHERE e.food_id=f.id) uses FROM foods f "
     params = []
     if q:
         sql += "WHERE f.name LIKE ? OR f.brand LIKE ? "
@@ -232,18 +437,24 @@ def list_foods():
 
 @app.post("/api/foods")
 def create_food():
+    d = request.get_json(force=True)
+    payload = food_payload(d)
+    photo = ""
+    if d.get("photo_url"):  # alimentos importados de Open Food Facts traen foto
+        img = off.download_image(d["photo_url"])
+        if img:
+            photo = save_photo_bytes(*img)
     with get_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO foods(name,brand,kcal,protein,carbs,fat,unit_g,unit_name) VALUES (?,?,?,?,?,?,?,?)",
-            food_payload(request.get_json(force=True)))
-        return jsonify(id=cur.lastrowid), 201
+            f"INSERT INTO foods({FOOD_COLS},photo) VALUES (?,?,?,?,?,?,?,?,?,?)", (*payload, photo))
+        return jsonify(id=cur.lastrowid, photo=photo), 201
 
 
 @app.put("/api/foods/<int:fid>")
 def update_food(fid):
     with get_conn() as conn:
         conn.execute(
-            "UPDATE foods SET name=?,brand=?,kcal=?,protein=?,carbs=?,fat=?,unit_g=?,unit_name=? WHERE id=?",
+            "UPDATE foods SET name=?,brand=?,kcal=?,protein=?,carbs=?,fat=?,unit_g=?,unit_name=?,barcode=? WHERE id=?",
             (*food_payload(request.get_json(force=True)), fid))
     return jsonify(ok=True)
 
@@ -254,7 +465,10 @@ def delete_food(fid):
         used = conn.execute("SELECT COUNT(*) FROM preset_items WHERE food_id=?", (fid,)).fetchone()[0]
         if used:
             abort(400, "Este alimento está en algún preset; quítalo de ahí primero")
+        old = conn.execute("SELECT photo FROM foods WHERE id=?", (fid,)).fetchone()
         conn.execute("DELETE FROM foods WHERE id=?", (fid,))
+        if old and old["photo"]:
+            (uploads_dir() / old["photo"]).unlink(missing_ok=True)
     return jsonify(ok=True)
 
 
@@ -266,31 +480,58 @@ def upload_photo(fid):
     ext = Path(f.filename).suffix.lower()
     if ext not in ALLOWED_EXT:
         abort(400, "Formato no permitido (jpg, png, webp, gif)")
-    UPLOADS.mkdir(parents=True, exist_ok=True)
-    name = f"{uuid.uuid4().hex}{ext}"
-    f.save(UPLOADS / name)
+    data = f.read()
+    if len(data) > 8 * 1024 * 1024:
+        abort(400, "La foto pesa más de 8 MB")
     with get_conn() as conn:
         old = conn.execute("SELECT photo FROM foods WHERE id=?", (fid,)).fetchone()
         if not old:
-            (UPLOADS / name).unlink(missing_ok=True)
             abort(404, "Alimento no encontrado")
+        name = save_photo_bytes(data, ext)
         if old["photo"]:
-            (UPLOADS / old["photo"]).unlink(missing_ok=True)
+            (uploads_dir() / old["photo"]).unlink(missing_ok=True)
         conn.execute("UPDATE foods SET photo=? WHERE id=?", (name, fid))
     return jsonify(photo=name)
 
 
+# ------------------------------------------------------- Open Food Facts
+@app.get("/api/off/search")
+def off_search():
+    q = (request.args.get("q") or "").strip()
+    if len(q) < 2:
+        abort(400, "Escribe al menos 2 letras")
+    try:
+        return jsonify(off.search(q))
+    except off.OffError as e:
+        abort(502, str(e))
+
+
+@app.get("/api/off/barcode/<code>")
+def off_barcode(code):
+    """Busca primero en tus alimentos y, si no está, en Open Food Facts."""
+    code = re.sub(r"\D", "", code)
+    with get_conn() as conn:
+        mine = conn.execute("SELECT * FROM foods WHERE barcode=? AND barcode!=''", (code,)).fetchone()
+    if mine:
+        return jsonify(local=dict(mine), online=None)
+    try:
+        online = off.by_barcode(code)
+    except off.OffError as e:
+        abort(502, str(e))
+    if not online:
+        abort(404, "Producto no encontrado. Puedes crearlo a mano en Alimentos.")
+    return jsonify(local=None, online=online)
+
+
 # ------------------------------------------------------------------ presets
-def load_presets(conn, pid=None):
-    presets = rows(conn.execute(
-        "SELECT * FROM presets" + (" WHERE id=?" if pid else "") + " ORDER BY name COLLATE NOCASE",
-        (pid,) if pid else ()))
+def load_presets(conn):
+    presets = rows(conn.execute("SELECT * FROM presets ORDER BY name COLLATE NOCASE"))
     for p in presets:
         p["items"] = rows(conn.execute(
             "SELECT pi.food_id, pi.grams, f.name, f.brand, f.kcal, f.protein, f.carbs, f.fat, f.photo "
             "FROM preset_items pi JOIN foods f ON f.id=pi.food_id WHERE pi.preset_id=? ORDER BY pi.id",
             (p["id"],)))
-        p["totals"] = totals([{**scale(i, i["grams"])} for i in p["items"]])
+        p["totals"] = totals([scale(i, i["grams"]) for i in p["items"]])
     return presets
 
 
@@ -303,6 +544,13 @@ def save_preset_items(conn, pid, items):
                          (pid, it["food_id"], g))
 
 
+def preset_name(d):
+    name = (d.get("name") or "").strip()
+    if not name:
+        abort(400, "El nombre es obligatorio")
+    return name
+
+
 @app.get("/api/presets")
 def list_presets():
     with get_conn() as conn:
@@ -312,23 +560,36 @@ def list_presets():
 @app.post("/api/presets")
 def create_preset():
     d = request.get_json(force=True)
-    name = (d.get("name") or "").strip()
-    if not name:
-        abort(400, "El nombre es obligatorio")
     with get_conn() as conn:
-        cur = conn.execute("INSERT INTO presets(name, meal) VALUES (?,?)", (name, clean_meal(d.get("meal"))))
+        cur = conn.execute("INSERT INTO presets(name, meal) VALUES (?,?)", (preset_name(d), clean_meal(d.get("meal"))))
         save_preset_items(conn, cur.lastrowid, d.get("items", []))
+        return jsonify(id=cur.lastrowid), 201
+
+
+@app.post("/api/presets/from-entries")
+def preset_from_entries():
+    """Convierte entradas ya apuntadas (alimentos, no 'solo kcal') en un preset."""
+    d = request.get_json(force=True)
+    ids = [int(i) for i in d.get("entry_ids", [])]
+    name = preset_name(d)
+    with get_conn() as conn:
+        items = []
+        for i in ids:
+            e = conn.execute("SELECT * FROM entries WHERE id=? AND kind='food' AND food_id IS NOT NULL", (i,)).fetchone()
+            if e:
+                items.append({"food_id": e["food_id"], "grams": e["grams"]})
+        if not items:
+            abort(400, "Solo se pueden guardar como preset entradas con alimento")
+        cur = conn.execute("INSERT INTO presets(name, meal) VALUES (?,?)", (name, clean_meal(d.get("meal"))))
+        save_preset_items(conn, cur.lastrowid, items)
         return jsonify(id=cur.lastrowid), 201
 
 
 @app.put("/api/presets/<int:pid>")
 def update_preset(pid):
     d = request.get_json(force=True)
-    name = (d.get("name") or "").strip()
-    if not name:
-        abort(400, "El nombre es obligatorio")
     with get_conn() as conn:
-        conn.execute("UPDATE presets SET name=?, meal=? WHERE id=?", (name, clean_meal(d.get("meal")), pid))
+        conn.execute("UPDATE presets SET name=?, meal=? WHERE id=?", (preset_name(d), clean_meal(d.get("meal")), pid))
         save_preset_items(conn, pid, d.get("items", []))
     return jsonify(ok=True)
 
@@ -344,21 +605,275 @@ def delete_preset(pid):
 @app.get("/api/settings")
 def get_settings():
     with get_conn() as conn:
-        return jsonify(get_goals(conn))
+        return jsonify(goals=get_goals(conn),
+                       profile={k: get_setting(conn, f"profile_{k}") for k in PROFILE_KEYS})
 
 
 @app.put("/api/settings")
 def put_settings():
     d = request.get_json(force=True)
     with get_conn() as conn:
-        for k in ("kcal", "protein", "carbs", "fat"):
-            if k in d:
-                conn.execute("UPDATE settings SET value=? WHERE key=?", (str(num(d[k])), f"goal_{k}"))
+        for k, v in (d.get("goals") or {}).items():
+            if k in ("kcal", "protein", "carbs", "fat"):
+                set_setting(conn, f"goal_{k}", num(v))
+        for k, v in (d.get("profile") or {}).items():
+            if k in PROFILE_KEYS:
+                set_setting(conn, f"profile_{k}", str(v)[:20])
+    return jsonify(ok=True)
+
+
+# ------------------------------------------------------------- Asistente Gemini (IA)
+@app.get("/api/ai/status")
+def ai_status():
+    with get_conn() as conn:
+        key, source = gemini.get_gemini_api_key(conn)
+        return jsonify(configured=bool(key), masked=gemini.mask_api_key(key), source=source)
+
+
+@app.post("/api/ai/key")
+def ai_set_key():
+    d = request.get_json(force=True) or {}
+    key = str(d.get("key", "")).strip()
+    with get_conn() as conn:
+        if not key:
+            conn.execute("DELETE FROM settings WHERE key='gemini_api_key'")
+        else:
+            set_setting(conn, "gemini_api_key", key)
+        k, source = gemini.get_gemini_api_key(conn)
+        return jsonify(ok=True, configured=bool(k), masked=gemini.mask_api_key(k), source=source)
+
+
+@app.post("/api/ai/parse")
+def ai_parse():
+    with get_conn() as conn:
+        key, _ = gemini.get_gemini_api_key(conn)
+        if not key:
+            abort(400, "Configura tu clave de API de Gemini en Ajustes o en el archivo .env")
+
+        # Catálogo de alimentos para que Gemini pueda emparejar
+        foods = rows(conn.execute("SELECT id, name, brand, kcal, protein, carbs, fat, unit_g, unit_name FROM foods ORDER BY name"))
+
+    text = ""
+    audio_bytes, audio_mime = None, "audio/webm"
+    image_bytes, image_mime = None, "image/jpeg"
+
+    # Soporte para JSON o multipart/form-data
+    if request.is_json:
+        d = request.get_json() or {}
+        text = str(d.get("text", "")).strip()
+        if d.get("audio_b64"):
+            try:
+                audio_bytes = base64.b64decode(d["audio_b64"])
+                audio_mime = d.get("audio_mime", "audio/webm")
+            except Exception:
+                abort(400, "Audio en base64 no válido")
+        if d.get("image_b64"):
+            try:
+                image_bytes = base64.b64decode(d["image_b64"])
+                image_mime = d.get("image_mime", "image/jpeg")
+            except Exception:
+                abort(400, "Imagen en base64 no válida")
+    else:
+        text = request.form.get("text", "").strip()
+        f_audio = request.files.get("audio")
+        if f_audio and f_audio.filename:
+            audio_bytes = f_audio.read()
+            audio_mime = f_audio.mimetype or "audio/webm"
+        f_img = request.files.get("image")
+        if f_img and f_img.filename:
+            image_bytes = f_img.read()
+            image_mime = f_img.mimetype or "image/jpeg"
+
+    if not text and not audio_bytes and not image_bytes:
+        abort(400, "Indica qué has comido por texto, nota de voz o foto")
+
+    try:
+        result = gemini.parse_with_gemini(
+            api_key=key,
+            text=text,
+            audio_bytes=audio_bytes,
+            audio_mime=audio_mime,
+            image_bytes=image_bytes,
+            image_mime=image_mime,
+            foods_catalog=foods,
+        )
+        return jsonify(result)
+    except gemini.GeminiError as e:
+        abort(502, str(e))
+
+
+@app.post("/api/ai/apply")
+def ai_apply():
+    """Añade los alimentos detectados por Gemini al día especificado."""
+    d = request.get_json(force=True) or {}
+    day = valid_date(d.get("date") or date.today().isoformat())
+    meal = clean_meal(d.get("meal"))
+    items = d.get("items", [])
+    if not items:
+        abort(400, "No hay alimentos para añadir")
+
+    added = 0
+    with get_conn() as conn:
+        for it in items:
+            name = (it.get("name") or "").strip() or "Alimento"
+            grams = num(it.get("grams"), None)
+            matched_id = it.get("matched_food_id")
+
+            # Si coincide con un alimento existente y tiene gramos, insertamos vinculado
+            if matched_id:
+                food = conn.execute("SELECT * FROM foods WHERE id=?", (matched_id,)).fetchone()
+                if food and grams and grams > 0:
+                    insert_food_entry(conn, day, meal, matched_id, grams)
+                    added += 1
+                    continue
+
+            # Inserción con macros calculadas por Gemini
+            conn.execute(
+                "INSERT INTO entries(date,time,meal,kind,name,grams,kcal,protein,carbs,fat,food_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (day, datetime.now().strftime("%H:%M"), meal, "food", name, grams,
+                 num(it.get("kcal")), num(it.get("protein")), num(it.get("carbs")), num(it.get("fat")), None),
+            )
+            added += 1
+
+    return jsonify(ok=True, added=added), 201
+
+
+
+# ------------------------------------------------------ conectar el móvil
+def lan_ips():
+    """IPs de este PC en la red local; la de la ruta principal va primero."""
+    ips = []
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("10.255.255.255", 1))  # no envía nada, solo elige interfaz
+        ips.append(s.getsockname()[0])
+        s.close()
+    except OSError:
+        pass
+    try:
+        ips += socket.gethostbyname_ex(socket.gethostname())[2]
+    except OSError:
+        pass
+    seen = []
+    for ip in ips:
+        if ip not in seen and not ip.startswith(("127.", "169.254.")):
+            seen.append(ip)
+    return seen
+
+
+def qr_svg(text):
+    if qrcode is None:
+        return ""
+    img = qrcode.make(text, image_factory=qrcode.image.svg.SvgPathImage, box_size=10, border=1)
+    buf = io.BytesIO()
+    img.save(buf)
+    return re.sub(r"^<\?xml[^>]*\?>\s*", "", buf.getvalue().decode())
+
+
+@app.get("/api/connect")
+def connect_info():
+    port = request.host.rsplit(":", 1)[-1] if ":" in request.host else "80"
+    local_only = os.environ.get("MACROS_LOCAL_ONLY") == "1"
+    urls = [] if local_only else [f"http://{ip}:{port}" for ip in lan_ips()]
+    with get_conn() as conn:
+        pin_set = bool(get_setting(conn, "pin_hash"))
+    return jsonify(urls=urls, local_only=local_only, pin_set=pin_set,
+                   qr=qr_svg(urls[0]) if urls else "")
+
+
+# --------------------------------------------------------- copia de seguridad
+@app.get("/api/export")
+def export_all():
+    """Copia completa en JSON (datos + fotos en base64). Sirve para mover la app a otro PC."""
+    with get_conn() as conn:
+        out = {"app": "calculadora-macros", "version": 1, "exported_at": datetime.now().isoformat(timespec="seconds")}
+        for t in EXPORT_TABLES:
+            out[t] = rows(conn.execute(f"SELECT * FROM {t}"))
+        out["settings"] = {r["key"]: r["value"] for r in conn.execute("SELECT * FROM settings")
+                           if r["key"].startswith(("goal_", "profile_"))}
+    out["photos"] = {}
+    for f in out["foods"]:
+        p = uploads_dir() / f["photo"] if f["photo"] else None
+        if p and p.is_file():
+            out["photos"][f["photo"]] = base64.b64encode(p.read_bytes()).decode()
+    resp = Response(json.dumps(out, ensure_ascii=False), mimetype="application/json")
+    resp.headers["Content-Disposition"] = f'attachment; filename="macros-backup-{date.today().isoformat()}.json"'
+    return resp
+
+
+@app.get("/api/export.csv")
+def export_csv():
+    buf = io.StringIO()
+    w = csv.writer(buf, delimiter=";")  # ';' para que Excel en español lo separe bien
+    w.writerow(["fecha", "hora", "comida", "nombre", "gramos", "kcal", "proteina", "hidratos", "grasa"])
+    with get_conn() as conn:
+        for e in conn.execute("SELECT * FROM entries ORDER BY date, time, id"):
+            w.writerow([e["date"], e["time"], e["meal"], e["name"], e["grams"] or "",
+                        str(e["kcal"]).replace(".", ","), str(e["protein"]).replace(".", ","),
+                        str(e["carbs"]).replace(".", ","), str(e["fat"]).replace(".", ",")])
+    resp = Response("\ufeff" + buf.getvalue(), mimetype="text/csv; charset=utf-8")
+    resp.headers["Content-Disposition"] = f'attachment; filename="macros-{date.today().isoformat()}.csv"'
+    return resp
+
+
+@app.post("/api/import")
+def import_all():
+    """Restaura una copia: REEMPLAZA todos los datos actuales."""
+    f = request.files.get("file")
+    try:
+        data = json.load(f.stream) if f else request.get_json(force=True)
+    except (ValueError, UnicodeDecodeError):
+        abort(400, "El archivo no es una copia válida")
+    if not isinstance(data, dict) or data.get("app") != "calculadora-macros":
+        abort(400, "El archivo no es una copia de Calculadora de Macros")
+    with get_conn() as conn:
+        for t in reversed(EXPORT_TABLES):
+            conn.execute(f"DELETE FROM {t}")
+        for t in EXPORT_TABLES:
+            cols = db.table_columns(conn, t)  # lista blanca de columnas
+            for r in data.get(t, []):
+                use = [c for c in cols if c in r]
+                conn.execute(f"INSERT INTO {t}({','.join(use)}) VALUES ({','.join('?' * len(use))})",
+                             [r[c] for c in use])
+        for k, v in (data.get("settings") or {}).items():
+            if k.startswith(("goal_", "profile_")):
+                set_setting(conn, k, v)
+    uploads_dir().mkdir(parents=True, exist_ok=True)
+    for name, b64 in (data.get("photos") or {}).items():
+        safe = Path(name).name  # evita rutas tipo ../../
+        if Path(safe).suffix.lower() in ALLOWED_EXT:
+            (uploads_dir() / safe).write_bytes(base64.b64decode(b64))
     return jsonify(ok=True)
 
 
 init_db()
 
+
+# ------------------------------------------------------------------ arranque
+def main():
+    ap = argparse.ArgumentParser(description="Calculadora de macros")
+    ap.add_argument("--port", type=int, default=int(os.environ.get("MACROS_PORT", 5000)))
+    ap.add_argument("--local", action="store_true", help="solo accesible desde este PC (no desde el móvil)")
+    ap.add_argument("--no-browser", action="store_true", help="no abrir el navegador al arrancar")
+    args = ap.parse_args()
+
+    host = "127.0.0.1" if args.local else "0.0.0.0"
+    if args.local:
+        os.environ["MACROS_LOCAL_ONLY"] = "1"
+    url = f"http://localhost:{args.port}"
+    print(f"\n  Calculadora de macros\n  En este PC:  {url}")
+    if not args.local:
+        for ip in lan_ips():
+            print(f"  En el móvil: http://{ip}:{args.port}   (misma wifi)")
+    print(f"  Datos en:    {db.DB_PATH.parent}\n  Ctrl+C para parar\n")
+    if not args.no_browser:
+        threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+    try:
+        app.run(host=host, port=args.port, threaded=True, debug=False)
+    except OSError as e:
+        raise SystemExit(f"No se pudo abrir el puerto {args.port} ({e}). Prueba: python app.py --port 5001")
+
+
 if __name__ == "__main__":
-    # host 0.0.0.0 para poder abrirlo desde el móvil en la misma wifi: http://<ip-del-pc>:5000
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    main()

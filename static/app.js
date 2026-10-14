@@ -1,8 +1,7 @@
-/* Calculadora de macros - frontend sin dependencias */
+/* Calculadora de macros - frontend sin dependencias. Iconos: icons.js · Gráficas: charts.js */
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const MEALS = ["desayuno", "comida", "merienda", "cena", "otro"];
-const MEAL_ICON = { desayuno: "🌅", comida: "🍝", merienda: "🍎", cena: "🌙", otro: "🍴" };
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const r0 = (n) => Math.round(n);
@@ -15,144 +14,265 @@ const parseISO = (s) => { const [y, m, d] = s.split("-").map(Number); return new
 const shiftDay = (s, n) => { const d = parseISO(s); d.setDate(d.getDate() + n); return isoDate(d); };
 const guessMeal = () => { const h = new Date().getHours(); return h < 11 ? "desayuno" : h < 16 ? "comida" : h < 19 ? "merienda" : "cena"; };
 
-const state = { tab: "today", date: isoDate(new Date()), foodQuery: "", histDays: 7 };
+let lastToday = isoDate(new Date());
+const state = { tab: "today", date: lastToday, foodQuery: "", histDays: 7 };
 
+// ---------------------------------------------------------------------- red
 async function api(method, url, body) {
   const opt = { method, headers: {} };
   if (body instanceof FormData) opt.body = body;
   else if (body !== undefined) { opt.headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(body); }
-  const res = await fetch(url, opt);
+  let res;
+  try { res = await fetch(url, opt); }
+  catch { toast("Sin conexión con el servidor"); throw new Error("offline"); }
   const data = await res.json().catch(() => ({}));
+  if (res.status === 401 && !url.startsWith("/api/auth/")) { closeSheet(); renderLogin(); throw new Error("auth"); }
   if (!res.ok) { toast(data.error || "Error"); throw new Error(data.error || res.statusText); }
   return data;
 }
 
 let toastTimer;
-function toast(msg) {
-  const t = $("#toast"); t.textContent = msg; t.classList.remove("hidden");
-  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.add("hidden"), 2200);
+function toast(msg, ok = false) {
+  const t = $("#toast"); t.innerHTML = (ok ? icon("check", 16) : "") + esc(msg); t.classList.remove("hidden");
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.add("hidden"), 2400);
 }
 
-function openSheet(html) { $("#sheet").innerHTML = html; $("#modal").classList.remove("hidden"); }
-function closeSheet() { $("#modal").classList.add("hidden"); $("#sheet").innerHTML = ""; }
+// ------------------------------------------------------------------ hojas modales
+let sheetCleanup = null;
+function openSheet(html, { onClose } = {}) { sheetCleanup = onClose || null; $("#sheet").innerHTML = html; $("#modal").classList.remove("hidden"); $("#sheet").scrollTop = 0; }
+function closeSheet() { sheetCleanup?.(); sheetCleanup = null; $("#modal").classList.add("hidden"); $("#sheet").innerHTML = ""; }
 $("#modal").addEventListener("mousedown", (e) => { if (e.target.id === "modal") closeSheet(); });
-const sheetHead = (title) => `<h1>${esc(title)}<button class="close" onclick="closeSheet()">×</button></h1>`;
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("#modal").classList.contains("hidden")) closeSheet(); });
+$("#sheet").addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target.tagName === "INPUT" && e.target.type !== "file" && $("#ok")) { e.preventDefault(); $("#ok").click(); } });
+const sheetHead = (title) => `<div class="head"><h1>${esc(title)}</h1><button class="icon-btn ghost" onclick="closeSheet()" aria-label="Cerrar">${icon("x", 22)}</button></div>`;
 
+// ---------------------------------------------------------------- piezas de UI
 const macroLine = (m) => `<span class="macros"><b class="mp">P ${r1(m.protein)}</b> · <b class="mc">C ${r1(m.carbs)}</b> · <b class="mf">G ${r1(m.fat)}</b></span>`;
-const thumb = (f) => f.photo ? `<img class="thumb" src="/uploads/${esc(f.photo)}" alt="">` : `<div class="thumb">🍽️</div>`;
+const thumb = (f, fallback = "apple") => f.photo ? `<img class="thumb" loading="lazy" src="/uploads/${esc(f.photo)}" alt="">` : `<div class="thumb">${icon(fallback, 22)}</div>`;
 const scaleFood = (f, g) => ({ kcal: f.kcal * g / 100, protein: f.protein * g / 100, carbs: f.carbs * g / 100, fat: f.fat * g / 100 });
-const mealChips = (sel) => `<div class="chips" id="mealChips">${MEALS.map((m) => `<button class="chip ${m === sel ? "on" : ""}" data-meal="${m}">${MEAL_ICON[m]} ${m}</button>`).join("")}</div>`;
-function bindMealChips(onChange) {
-  $$("#mealChips .chip").forEach((b) => b.onclick = () => { $$("#mealChips .chip").forEach((x) => x.classList.remove("on")); b.classList.add("on"); onChange?.(b.dataset.meal); });
-}
+const mealChips = (sel) => `<div class="chips" id="mealChips">${MEALS.map((m) => `<button type="button" class="chip ${m === sel ? "on" : ""}" data-meal="${m}">${icon(MEAL_ICON[m], 15)} ${m}</button>`).join("")}</div>`;
+function bindMealChips() { $$("#mealChips .chip").forEach((b) => b.onclick = () => { $$("#mealChips .chip").forEach((x) => x.classList.remove("on")); b.classList.add("on"); }); }
 const selectedMeal = () => $("#mealChips .chip.on")?.dataset.meal || "otro";
+const foodRow = (f, extra = "", fallback = "apple") => `<div class="item" data-id="${f.id ?? ""}">${thumb(f, fallback)}
+  <div class="grow"><div class="title">${esc(f.name)}${f.brand ? ` <span class="muted">${esc(f.brand)}</span>` : ""}</div>
+  <span class="macros">100 g · <b class="mp">P ${r1(f.protein)}</b> · <b class="mc">C ${r1(f.carbs)}</b> · <b class="mf">G ${r1(f.fat)}</b></span></div>
+  <div class="kcal-tag">${r0(f.kcal)}<small>kcal</small></div>${extra}</div>`;
+const emptyBox = (ic, text) => `<div class="empty">${icon(ic, 40)}<div>${text}</div></div>`;
 
-// ------------------------------------------------------------------ navegación
-$$("#tabs button").forEach((b) => b.onclick = () => go(b.dataset.tab));
-function go(tab) {
-  state.tab = tab;
-  $$("#tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
-  render();
+// ----------------------------------------------------------------- navegación
+const TABS = [["today", "home", "Hoy"], ["presets", "zap", "Presets"], ["foods", "apple", "Alimentos"], ["progress", "chart", "Progreso"], ["settings", "sliders", "Ajustes"]];
+function buildNav() {
+  $("#tabs").innerHTML = `<div class="brand">${icon("flame", 30)}</div>` + TABS.map(([id, ic, label]) =>
+    `<button data-tab="${id}" class="${id === state.tab ? "active" : ""}">${icon(ic, 23)}${label}</button>`).join("");
+  $$("#tabs button").forEach((b) => b.onclick = () => go(b.dataset.tab));
 }
-function render() { ({ today: renderToday, presets: renderPresets, foods: renderFoods, history: renderHistory })[state.tab](); window.scrollTo(0, 0); }
+function go(tab) { state.tab = tab; buildNav(); render(); }
+function render() {
+  document.body.classList.remove("locked");
+  ({ today: renderToday, presets: renderPresets, foods: renderFoods, progress: renderProgress, settings: renderSettings })[state.tab]();
+  window.scrollTo(0, 0);
+}
+// Si la app se queda abierta toda la noche, al volver pasa a "hoy" sola
+document.addEventListener("visibilitychange", () => {
+  const now = isoDate(new Date());
+  if (!document.hidden && now !== lastToday) { if (state.date === lastToday) state.date = now; lastToday = now; if (state.tab === "today") renderToday(); }
+});
 
-// ------------------------------------------------------------------------- HOY
+// ============================================================================ HOY
 async function renderToday() {
   const d = await api("GET", `/api/day/${state.date}`);
   const isToday = state.date === isoDate(new Date());
   const label = parseISO(state.date).toLocaleDateString("es-ES", { weekday: "long", day: "numeric", month: "long" });
-  const g = d.goals, t = d.totals;
+  const g = d.goals, t = d.totals, remaining = g.kcal - t.kcal;
   const pct = (v, goal) => Math.min(100, goal ? (v / goal) * 100 : 0);
-  const over = (v, goal) => (v > goal ? "over" : "");
-  const macro = (key, name, cls, color) => `<div><div class="lbl">${name}</div><div class="val ${cls}">${r0(t[key])} / ${r0(g[key])} g</div>
-      <div class="bar ${over(t[key], g[key])}"><i style="width:${pct(t[key], g[key])}%;background:${color}"></i></div></div>`;
-  const remaining = g.kcal - t.kcal;
+  const macro = (key, name, ic, cls, color) => `<div class="macro"><div class="top"><span class="${cls}">${icon(ic, 14)}</span>${name}</div>
+      <div class="val">${r0(t[key])}<small> / ${r0(g[key])} g</small></div>
+      <div class="bar ${t[key] > g[key] ? "over" : ""}"><i style="width:${pct(t[key], g[key])}%;background:${color}"></i></div></div>`;
 
   const byMeal = {};
   d.entries.forEach((e) => (byMeal[e.meal] ||= []).push(e));
   const meals = MEALS.filter((m) => byMeal[m]).map((m) => {
     const list = byMeal[m], sum = list.reduce((a, e) => a + e.kcal, 0);
-    return `<h2>${MEAL_ICON[m]} ${m} · ${r0(sum)} kcal</h2>` + list.map((e) => `
-      <div class="item" onclick="editEntry(${e.id})">
-        <div class="grow"><div class="title">${e.kind === "quick" ? "⚡ " : ""}${esc(e.name)}${e.grams ? ` <span class="muted">${r0(e.grams)} g</span>` : ""}</div>
-          ${e.protein || e.carbs || e.fat ? macroLine(e) : '<span class="macros">solo kcal</span>'}</div>
-        <div class="kcal-tag">${r0(e.kcal)}</div></div>`).join("");
+    const canPreset = list.filter((e) => e.kind === "food" && e.food_id).length > 0;
+    return `<div class="meal-head"><h2>${icon(MEAL_ICON[m], 16)} ${m} · ${r0(sum)} kcal</h2>
+      ${canPreset ? `<button class="icon-btn ghost" title="Guardar como preset" onclick="saveMealAsPreset('${m}')">${icon("bookmark", 18)}</button>` : ""}</div>` +
+      list.map((e) => `<div class="item" onclick="editEntry(${e.id})">
+        <div class="thumb ${e.kind === "quick" ? "accent" : ""}">${icon(e.kind === "quick" ? "flame" : "utensils", 21)}</div>
+        <div class="grow"><div class="title">${esc(e.name)}${e.grams ? ` <span class="muted">${r0(e.grams)} g</span>` : ""}</div>
+          ${e.protein || e.carbs || e.fat ? macroLine(e) : '<span class="macros">solo calorías</span>'}</div>
+        <div class="kcal-tag">${r0(e.kcal)}<small>kcal</small></div></div>`).join("");
   }).join("");
 
   $("#view").innerHTML = `
     <div class="datebar">
-      <button onclick="changeDay(-1)">‹</button>
-      <div class="date"><strong>${isToday ? "Hoy" : label}</strong><span class="muted">${isToday ? label : state.date}</span>
-        ${isToday ? "" : `<div><button class="chip" style="width:auto;height:auto;margin-top:4px" onclick="state.date=isoDate(new Date());renderToday()">Ir a hoy</button></div>`}</div>
-      <button onclick="changeDay(1)">›</button>
+      <button class="icon-btn" onclick="changeDay(-1)" aria-label="Día anterior">${icon("left", 22)}</button>
+      <div class="date" onclick="pickDate()"><strong>${isToday ? "Hoy" : label}</strong><span class="muted">${isToday ? label : "Toca para cambiar de día"}</span></div>
+      ${isToday ? "" : `<button class="chip on" onclick="state.date=isoDate(new Date());renderToday()">Hoy</button>`}
+      <button class="icon-btn" onclick="changeDay(1)" aria-label="Día siguiente">${icon("right", 22)}</button>
     </div>
     <div class="card">
-      <div class="row between"><div><div class="big">${r0(t.kcal)}</div><div class="muted">de ${r0(g.kcal)} kcal</div></div>
-        <div style="text-align:right"><div class="big" style="font-size:1.4rem;color:${remaining < 0 ? "var(--danger)" : "var(--accent)"}">${r0(Math.abs(remaining))}</div>
-        <div class="muted">${remaining < 0 ? "te has pasado" : "restantes"}</div></div></div>
-      <div class="bar ${over(t.kcal, g.kcal)}"><i style="width:${pct(t.kcal, g.kcal)}%;background:var(--kcal)"></i></div>
-      <div class="macro-grid">${macro("protein", "Proteína", "mp", "var(--p)")}${macro("carbs", "Hidratos", "mc", "var(--c)")}${macro("fat", "Grasa", "mf", "var(--f)")}</div>
+      <div class="summary">
+        <div class="ring-wrap">${ringChart(t.kcal, g.kcal)}
+          <div class="center"><div class="big">${r0(t.kcal)}</div><div class="muted">kcal</div></div></div>
+        <div class="stats">
+          <div class="stat"><div class="lbl">${remaining < 0 ? "Te has pasado" : "Te quedan"}</div>
+            <div class="val" style="color:${remaining < 0 ? "var(--danger)" : "var(--accent)"}">${r0(Math.abs(remaining))} kcal</div></div>
+          <div class="stat"><div class="lbl">Objetivo</div><div class="val">${r0(g.kcal)} kcal</div></div>
+        </div>
+      </div>
+      <div class="macro-grid">${macro("protein", "Proteína", "beef", "mp", "var(--p)")}${macro("carbs", "Hidratos", "wheat", "mc", "var(--c)")}${macro("fat", "Grasa", "droplet", "mf", "var(--f)")}</div>
     </div>
-    <div class="actions">
-      <button class="btn primary" onclick="addFood()">＋ Alimento</button>
-      <button class="btn" onclick="addPreset()">⚡ Preset</button>
-      <button class="btn" onclick="addQuick()">🔥 Solo kcal</button>
+    <div class="tiles">
+      <button class="tile primary" onclick="addFood()"><span class="ic">${icon("plus", 22)}</span>Alimento</button>
+      <button class="tile" onclick="addPreset()"><span class="ic">${icon("zap", 20)}</span>Preset</button>
+      <button class="tile" onclick="addQuick()"><span class="ic">${icon("flame", 20)}</span>Solo kcal</button>
+      <button class="tile ai" onclick="openAiSheet()"><span class="ic">${icon("sparkles", 20)}</span>IA / Voz</button>
+      <button class="tile" onclick="repeatDay()"><span class="ic">${icon("repeat", 20)}</span>Repetir</button>
     </div>
-    ${meals || '<div class="empty">Nada apuntado este día.<br>Pulsa arriba para añadir.</div>'}`;
+    ${meals || emptyBox("utensils", "Nada apuntado este día.<br>Pulsa <b>Alimento</b> para empezar.")}`;
 }
 function changeDay(n) { state.date = shiftDay(state.date, n); renderToday(); }
+function pickDate() {
+  openSheet(`${sheetHead("Ir a un día")}<input id="pd" type="date" value="${state.date}">
+    <button class="btn primary block" style="margin-top:14px" id="ok">Ir</button>`);
+  $("#ok").onclick = () => { if ($("#pd").value) { state.date = $("#pd").value; closeSheet(); renderToday(); } };
+}
 
-// --- añadir alimento
+// --- repetir un día
+function repeatDay() {
+  openSheet(`${sheetHead("Repetir comidas")}
+    <p class="muted">Copia lo que comiste otro día a <b>${esc(state.date)}</b>.</p>
+    <label>Copiar desde</label><input id="rd" type="date" value="${shiftDay(state.date, -1)}">
+    <label>Qué copiar</label><select id="rm"><option value="">Todo el día</option>${MEALS.map((m) => `<option value="${m}">Solo ${m}</option>`).join("")}</select>
+    <button class="btn primary block" style="margin-top:14px" id="ok">${icon("copy", 18)} Copiar</button>`);
+  $("#ok").onclick = async () => {
+    const r = await api("POST", "/api/entries/copy", { from_date: $("#rd").value, to_date: state.date, meal: $("#rm").value || undefined });
+    closeSheet(); toast(r.copied ? `${r.copied} entrada(s) copiadas` : "Ese día no tenía nada", !!r.copied); renderToday();
+  };
+}
+
+// --- guardar una comida como preset
+async function saveMealAsPreset(meal) {
+  const d = await api("GET", `/api/day/${state.date}`);
+  const ids = d.entries.filter((e) => e.meal === meal && e.kind === "food" && e.food_id).map((e) => e.id);
+  openSheet(`${sheetHead("Guardar como preset")}<p class="muted">Se guardarán los ${ids.length} alimentos de ${esc(meal)} con sus cantidades.</p>
+    <label>Nombre del preset</label><input id="pn" placeholder="Mi desayuno de siempre">
+    <button class="btn primary block" style="margin-top:14px" id="ok">${icon("bookmark", 18)} Guardar</button>`);
+  $("#pn").focus();
+  $("#ok").onclick = async () => {
+    if (!$("#pn").value.trim()) return toast("Ponle un nombre");
+    await api("POST", "/api/presets/from-entries", { name: $("#pn").value, meal, entry_ids: ids });
+    closeSheet(); toast("Preset guardado", true);
+  };
+}
+
+// --- añadir alimento (mis alimentos / online)
 async function addFood() {
   const foods = await api("GET", "/api/foods");
   openSheet(`${sheetHead("Añadir alimento")}${mealChips(guessMeal())}
-    <input id="q" placeholder="Buscar alimento…" autocomplete="off"><div id="foodList" style="margin-top:10px"></div>`);
+    <div class="search"><span>${icon("search", 18)}</span><input id="q" placeholder="Buscar en mis alimentos…" autocomplete="off">
+      <button class="icon-btn ghost scan" onclick="scanBarcode(selectedMeal())" title="Escanear código de barras">${icon("barcode", 22)}</button></div>
+    <div id="foodList" style="margin-top:12px"></div>`);
   bindMealChips();
   const draw = () => {
     const q = $("#q").value.trim().toLowerCase();
     const list = foods.filter((f) => !q || (f.name + " " + f.brand).toLowerCase().includes(q));
-    $("#foodList").innerHTML = list.map((f) => `<div class="item" data-id="${f.id}">${thumb(f)}
-      <div class="grow"><div class="title">${esc(f.name)}${f.brand ? ` <span class="muted">${esc(f.brand)}</span>` : ""}</div>
-      <span class="macros">por 100 g · P ${r1(f.protein)} · C ${r1(f.carbs)} · G ${r1(f.fat)}</span></div>
-      <div class="kcal-tag">${r0(f.kcal)}</div></div>`).join("") || '<div class="empty">Sin resultados. Crea el alimento en la pestaña Alimentos.</div>';
+    $("#foodList").innerHTML = list.map((f) => foodRow(f)).join("") + (q.length > 1 ? `<button class="btn block" id="goOnline">${icon("globe", 18)} Buscar «${esc($("#q").value.trim())}» online</button>` : "")
+      || emptyBox("apple", "Aún no hay alimentos.");
     $$("#foodList .item").forEach((el) => el.onclick = () => pickFood(foods.find((f) => f.id == el.dataset.id), selectedMeal()));
+    $("#goOnline")?.addEventListener("click", () => onlineSearch($("#q").value.trim(), selectedMeal()));
   };
   $("#q").oninput = draw; draw(); $("#q").focus();
 }
+
 function pickFood(f, meal) {
   const hasUnit = f.unit_g > 0;
   openSheet(`${sheetHead(f.name)}${mealChips(meal)}
-    <div class="grid2">${hasUnit ? `<div><label>${esc(f.unit_name || "unidades")}</label><input id="units" inputmode="decimal" value="1"></div>` : ""}
+    <div class="grid2">${hasUnit ? `<div><label>${esc(f.unit_name || "Unidades")}</label><input id="units" inputmode="decimal" value="1"></div>` : ""}
       <div><label>Gramos</label><input id="grams" inputmode="decimal" value="${hasUnit ? f.unit_g : 100}"></div></div>
     <div class="preview"><div class="big" id="pk"></div><div id="pm"></div></div>
-    <button class="btn primary" style="width:100%" id="ok">Añadir</button>`);
+    <button class="btn primary block" id="ok">${icon("plus", 18)} Añadir</button>`);
   bindMealChips();
   const upd = () => { const m = scaleFood(f, toNum($("#grams").value)); $("#pk").textContent = `${r0(m.kcal)} kcal`; $("#pm").innerHTML = macroLine(m); };
   $("#grams").oninput = () => { if (hasUnit) $("#units").value = r1(toNum($("#grams").value) / f.unit_g); upd(); };
   if (hasUnit) $("#units").oninput = () => { $("#grams").value = r1(toNum($("#units").value) * f.unit_g); upd(); };
   $("#ok").onclick = async () => {
     await api("POST", "/api/entries", { date: state.date, meal: selectedMeal(), food_id: f.id, grams: toNum($("#grams").value) });
-    closeSheet(); toast("Añadido ✓"); renderToday();
+    closeSheet(); toast("Añadido", true); renderToday();
   };
-  upd(); $("#grams").select();
+  upd(); ($("#units") || $("#grams")).select();
+}
+
+// --- buscar online (Open Food Facts) y guardar en mis alimentos
+async function saveOnline(item) {
+  const r = await api("POST", "/api/foods", item);
+  return { ...item, id: r.id, photo: r.photo, unit_g: null, unit_name: "" };
+}
+function onlineSearch(query = "", meal = null, importOnly = false) {
+  openSheet(`${sheetHead("Buscar online")}<p class="muted">Base de datos abierta Open Food Facts. Al elegir un producto se guarda en tus alimentos.</p>
+    <div class="search"><span>${icon("search", 18)}</span><input id="oq" placeholder="Ej. yogur proteínas Hacendado" value="${esc(query)}" autocomplete="off">
+      <button class="icon-btn ghost scan" onclick="scanBarcode(${meal ? `'${meal}'` : "null"})" title="Escanear código">${icon("barcode", 22)}</button></div>
+    <div id="ores" style="margin-top:12px"></div>`);
+  let last = 0;
+  const run = async () => {
+    const q = $("#oq").value.trim(); if (q.length < 2) return;
+    const id = ++last; $("#ores").innerHTML = `<div class="empty small">${icon("search", 26, "spin")}Buscando…</div>`;
+    let list; try { list = await api("GET", `/api/off/search?q=${encodeURIComponent(q)}`); } catch { if (id === last) $("#ores").innerHTML = emptyBox("globe", "No se pudo buscar online. ¿Tienes internet?"); return; }
+    if (id !== last) return;
+    $("#ores").innerHTML = list.length ? list.map((f, i) => foodRow({ ...f, id: i, photo: "" }, "", "globe")).join("") : emptyBox("search", "Sin resultados");
+    $$("#ores .item").forEach((el) => el.onclick = async () => {
+      const f = await saveOnline(list[el.dataset.id]);
+      if (importOnly || !meal) { closeSheet(); toast("Guardado en tus alimentos", true); if (state.tab === "foods") renderFoods(); } else pickFood(f, meal);
+    });
+  };
+  $("#oq").addEventListener("keydown", (e) => { if (e.key === "Enter") run(); });
+  if (query.length > 1) run(); else $("#oq").focus();
+}
+
+// --- escáner de código de barras
+function scanBarcode(meal) {
+  let stream = null, stopped = false;
+  const canCam = "BarcodeDetector" in window && navigator.mediaDevices?.getUserMedia && window.isSecureContext;
+  openSheet(`${sheetHead("Código de barras")}
+    ${canCam ? '<video class="scan" id="vid" playsinline muted></video>' : `<div class="note">${icon("info", 18)}<div>La cámara solo funciona en este navegador si abres la app con <b>https</b> o desde el propio PC (<b>localhost</b>). Escribe el código a mano.</div></div>`}
+    <label>Código (EAN)</label><input id="bc" inputmode="numeric" placeholder="8480000340420">
+    <button class="btn primary block" style="margin-top:14px" id="ok">${icon("search", 18)} Buscar</button>`,
+    { onClose: () => { stopped = true; stream?.getTracks().forEach((t) => t.stop()); } });
+  const lookup = async (code) => {
+    if (stopped) return; stopped = true; stream?.getTracks().forEach((t) => t.stop());
+    const r = await api("GET", `/api/off/barcode/${encodeURIComponent(code)}`).catch(() => null);
+    if (!r) return scanBarcode(meal);
+    const food = r.local || await saveOnline(r.online);
+    pickFood(food, meal || guessMeal());
+  };
+  $("#ok").onclick = () => { const c = $("#bc").value.trim(); if (c) lookup(c); };
+  if (canCam) (async () => {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+      const v = $("#vid"); v.srcObject = stream; await v.play();
+      const det = new BarcodeDetector({ formats: ["ean_13", "ean_8", "upc_a", "upc_e"] });
+      const tick = async () => { if (stopped) return; try { const c = await det.detect(v); if (c[0]) return lookup(c[0].rawValue); } catch {} requestAnimationFrame(tick); };
+      tick();
+    } catch { $("#vid")?.remove(); toast("No se pudo abrir la cámara"); }
+  })();
 }
 
 // --- añadir preset
 async function addPreset() {
   const presets = await api("GET", "/api/presets");
   openSheet(`${sheetHead("Añadir preset")}${presets.length ? presets.map((p) => `<div class="item" data-id="${p.id}">
-      <div class="thumb">⚡</div><div class="grow"><div class="title">${esc(p.name)}</div>${macroLine(p.totals)}</div>
-      <div class="kcal-tag">${r0(p.totals.kcal)}</div></div>`).join("") : '<div class="empty">Aún no tienes presets. Créalos en la pestaña Presets.</div>'}`);
+      <div class="thumb accent">${icon("zap", 22)}</div><div class="grow"><div class="title">${esc(p.name)}</div>${macroLine(p.totals)}</div>
+      <div class="kcal-tag">${r0(p.totals.kcal)}<small>kcal</small></div></div>`).join("") : emptyBox("zap", "Aún no tienes presets.<br>Créalos en la pestaña Presets.")}`);
   $$("#sheet .item").forEach((el) => el.onclick = () => pickPreset(presets.find((p) => p.id == el.dataset.id)));
 }
 function pickPreset(p) {
   openSheet(`${sheetHead(p.name)}${mealChips(p.meal || guessMeal())}
     <label>Multiplicador de todo el preset</label><input id="mult" inputmode="decimal" value="1">
     <label>Gramos por ingrediente (editables)</label>
-    ${p.items.map((i, k) => `<div class="preset-ing" style="grid-template-columns:1fr 90px"><div class="title">${esc(i.name)}</div>
+    ${p.items.map((i, k) => `<div class="ing-name"><div class="title">${esc(i.name)}</div>
       <input data-k="${k}" data-base="${i.grams}" inputmode="decimal" value="${i.grams}"></div>`).join("")}
     <div class="preview"><div class="big" id="pk"></div><div id="pm"></div></div>
-    <button class="btn primary" style="width:100%" id="ok">Añadir</button>`);
+    <button class="btn primary block" id="ok">${icon("plus", 18)} Añadir</button>`);
   bindMealChips();
   const upd = () => {
     const tot = { kcal: 0, protein: 0, carbs: 0, fat: 0 };
@@ -164,74 +284,313 @@ function pickPreset(p) {
   $("#ok").onclick = async () => {
     const items = $$("#sheet input[data-k]").map((i) => ({ food_id: p.items[i.dataset.k].food_id, grams: toNum(i.value) }));
     await api("POST", "/api/entries/preset", { date: state.date, meal: selectedMeal(), items });
-    closeSheet(); toast("Preset añadido ✓"); renderToday();
+    closeSheet(); toast("Preset añadido", true); renderToday();
   };
   upd();
 }
 
 // --- solo kcal (sin detallar)
 function addQuick() {
-  openSheet(`${sheetHead("Solo calorías")}${mealChips(guessMeal())}
+  openSheet(`${sheetHead("Solo calorías")}<p class="muted">Para cuando no quieres detallar: «cumple ≈ 500 kcal».</p>${mealChips(guessMeal())}
     <label>¿Qué ha sido? (opcional)</label><input id="qn" placeholder="Cumple: papas, fuet, queso…">
     <label>Kcal aproximadas</label><input id="qk" inputmode="decimal" placeholder="500">
-    <details style="margin-top:10px"><summary class="muted">Añadir macros (opcional)</summary>
-      <div class="grid4"><div><label>Prot</label><input id="qp" inputmode="decimal"></div><div><label>Hidr</label><input id="qc" inputmode="decimal"></div><div><label>Grasa</label><input id="qf" inputmode="decimal"></div></div></details>
-    <button class="btn primary" style="width:100%;margin-top:16px" id="ok">Añadir</button>`);
+    <details><summary>Añadir macros (opcional)</summary>
+      <div class="grid3"><div><label>Prot</label><input id="qp" inputmode="decimal"></div><div><label>Hidr</label><input id="qc" inputmode="decimal"></div><div><label>Grasa</label><input id="qf" inputmode="decimal"></div></div></details>
+    <button class="btn primary block" style="margin-top:16px" id="ok">${icon("plus", 18)} Añadir</button>`);
   bindMealChips(); $("#qk").focus();
   $("#ok").onclick = async () => {
     if (!toNum($("#qk").value)) return toast("Pon las kcal");
     await api("POST", "/api/entries", { kind: "quick", date: state.date, meal: selectedMeal(), name: $("#qn").value, kcal: toNum($("#qk").value), protein: toNum($("#qp").value), carbs: toNum($("#qc").value), fat: toNum($("#qf").value) });
-    closeSheet(); toast("Añadido ✓"); renderToday();
+    closeSheet(); toast("Añadido", true); renderToday();
   };
 }
 
-// --- editar / borrar entrada
+// --- Asistente Gemini (texto, voz, foto)
+function openAiSheet() {
+  let attachedImage = null;
+  let isRecording = false;
+  let recognition = null;
+  const hasSpeech = "webkitSpeechRecognition" in window || "SpeechRecognition" in window;
+
+  openSheet(`
+    ${sheetHead("Asistente Gemini")}
+    <p class="muted" style="margin-top:0">Dile o escribe lo que has comido, o añade una foto de tu plato o etiqueta.</p>
+    ${mealChips(guessMeal())}
+    <div style="margin:8px 0">
+      <textarea id="aiInput" rows="3" style="width:100%;resize:vertical" placeholder="Ej: He comido 200g de pechuga a la plancha, un bol de arroz y una manzana... o pulsa el micro"></textarea>
+    </div>
+    <div id="aiAttachWrap" class="hidden"></div>
+    <div class="row" style="gap:8px;margin-bottom:12px">
+      <button type="button" class="btn small" id="aiVoiceBtn">${icon("mic", 16)} <span id="aiVoiceLabel">Dictar por voz</span></button>
+      <button type="button" class="btn small" id="aiPhotoBtn">${icon("camera", 16)} Foto</button>
+      <input type="file" id="aiPhotoInput" accept="image/*" class="hidden">
+    </div>
+    <button class="btn primary block" id="aiSubmit">${icon("sparkles", 18)} Analizar con Gemini</button>
+    <div id="aiResults"></div>
+  `, {
+    onClose: () => {
+      if (recognition && isRecording) { try { recognition.stop(); } catch {} }
+    }
+  });
+
+  bindMealChips();
+  const inp = $("#aiInput");
+  inp.focus();
+
+  // Gestión de voz con Web Speech API
+  const voiceBtn = $("#aiVoiceBtn");
+  const voiceLabel = $("#aiVoiceLabel");
+
+  if (hasSpeech) {
+    const SpeechClass = window.SpeechRecognition || window.webkitSpeechRecognition;
+    recognition = new SpeechClass();
+    recognition.lang = "es-ES";
+    recognition.continuous = true;
+    recognition.interimResults = true;
+
+    recognition.onresult = (event) => {
+      let finalTranscript = "";
+      for (let i = event.resultIndex; i < event.results.length; ++i) {
+        if (event.results[i].isFinal) {
+          finalTranscript += event.results[i][0].transcript + " ";
+        }
+      }
+      if (finalTranscript) {
+        inp.value = (inp.value ? inp.value.trim() + " " : "") + finalTranscript.trim();
+      }
+    };
+
+    recognition.onerror = () => stopVoice();
+    recognition.onend = () => { if (isRecording) stopVoice(); };
+  } else {
+    voiceBtn.title = "Tu navegador no soporta dictado directo por voz";
+  }
+
+  function startVoice() {
+    if (!hasSpeech) return toast("Tu navegador no soporta dictado por voz");
+    isRecording = true;
+    voiceBtn.classList.add("pulsing");
+    voiceLabel.textContent = "Escuchando...";
+    try { recognition.start(); } catch {}
+  }
+
+  function stopVoice() {
+    isRecording = false;
+    voiceBtn.classList.remove("pulsing");
+    voiceLabel.textContent = "Dictar por voz";
+    try { recognition.stop(); } catch {}
+  }
+
+  voiceBtn.onclick = () => {
+    if (isRecording) stopVoice();
+    else startVoice();
+  };
+
+  // Adjuntar foto
+  const photoBtn = $("#aiPhotoBtn");
+  const photoInput = $("#aiPhotoInput");
+  const attachWrap = $("#aiAttachWrap");
+
+  photoBtn.onclick = () => photoInput.click();
+  photoInput.onchange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reduced = await shrinkImage(file, 1024);
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      attachedImage = { dataUrl: evt.target.result, mime: reduced.type || "image/jpeg" };
+      attachWrap.classList.remove("hidden");
+      attachWrap.innerHTML = `
+        <div class="attach-preview">
+          <img src="${evt.target.result}" alt="Foto adjunta">
+          <div class="grow"><div class="title">${esc(file.name)}</div><div class="muted">Foto lista para analizar</div></div>
+          <button type="button" class="icon-btn ghost" id="rmAttach">${icon("x", 18)}</button>
+        </div>`;
+      $("#rmAttach").onclick = () => {
+        attachedImage = null;
+        attachWrap.classList.add("hidden");
+        attachWrap.innerHTML = "";
+        photoInput.value = "";
+      };
+    };
+    reader.readAsDataURL(reduced);
+  };
+
+  // Llamada a Gemini
+  const submitBtn = $("#aiSubmit");
+  const resultsDiv = $("#aiResults");
+
+  submitBtn.onclick = async () => {
+    stopVoice();
+    const textVal = inp.value.trim();
+    if (!textVal && !attachedImage) {
+      return toast("Escribe lo que has comido o adjunta una foto");
+    }
+
+    submitBtn.disabled = true;
+    submitBtn.innerHTML = `${icon("sparkles", 18, "spin")} Consultando a Gemini...`;
+    resultsDiv.innerHTML = `<div class="empty small">${icon("sparkles", 26, "spin")}Analizando alimentos y calculando macros...</div>`;
+
+    try {
+      let image_b64 = null, image_mime = null;
+      if (attachedImage && attachedImage.dataUrl) {
+        image_b64 = attachedImage.dataUrl.split(",")[1];
+        image_mime = attachedImage.mime;
+      }
+
+      const res = await api("POST", "/api/ai/parse", {
+        text: textVal,
+        image_b64,
+        image_mime,
+      });
+
+      renderAiResults(res);
+    } catch (err) {
+      resultsDiv.innerHTML = `<div class="note">${icon("info", 18)}<div>${esc(err.message)}</div></div>`;
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.innerHTML = `${icon("sparkles", 18)} Analizar con Gemini`;
+    }
+  };
+
+  function renderAiResults(data) {
+    if (!data.items || !data.items.length) {
+      resultsDiv.innerHTML = `<div class="empty small">Gemini no ha detectado alimentos claros. Prueba a dar más detalles.</div>`;
+      return;
+    }
+
+    let itemsHtml = data.items.map((it, idx) => `
+      <div class="ai-item" data-idx="${idx}">
+        <div class="row between">
+          <div class="grow">
+            <input class="ai-name" value="${esc(it.name)}" style="font-weight:700;padding:6px 8px;margin-bottom:4px">
+            <span class="ai-badge ${it.matched_food_id ? 'matched' : 'estimated'}">
+              ${it.matched_food_id ? '✓ Coincide con tu base' : '★ Estimación IA'}
+            </span>
+          </div>
+          <button type="button" class="icon-btn ghost ai-del" title="Eliminar ítem">${icon("trash", 16)}</button>
+        </div>
+        <div class="grid2" style="margin-top:8px">
+          <div><label style="margin:2px 0">Gramos / Cantidad</label><input class="ai-grams" inputmode="decimal" value="${it.grams || 100}"></div>
+          <div><label style="margin:2px 0">Calorías (kcal)</label><input class="ai-kcal" inputmode="decimal" value="${r0(it.kcal)}"></div>
+        </div>
+        <div class="grid3" style="margin-top:6px">
+          <div><label style="margin:2px 0">Prot (g)</label><input class="ai-p" inputmode="decimal" value="${r1(it.protein)}"></div>
+          <div><label style="margin:2px 0">Hidr (g)</label><input class="ai-c" inputmode="decimal" value="${r1(it.carbs)}"></div>
+          <div><label style="margin:2px 0">Grasa (g)</label><input class="ai-f" inputmode="decimal" value="${r1(it.fat)}"></div>
+        </div>
+      </div>
+    `).join("");
+
+    resultsDiv.innerHTML = `
+      <div class="result" style="margin-top:14px">
+        <div class="row between">
+          <div>
+            <strong>${esc(data.summary || "Alimentos detectados")}</strong>
+            <div class="muted">${data.items.length} alimento(s) detectado(s)</div>
+          </div>
+          <div class="kcal-tag" style="font-size:1.2rem">${r0(data.total_kcal || 0)}<small>kcal</small></div>
+        </div>
+        ${data.notes ? `<p class="muted" style="margin:6px 0;font-size:.82rem">${esc(data.notes)}</p>` : ""}
+        <div id="aiItemsList" style="margin-top:10px">${itemsHtml}</div>
+        <button class="btn primary block" style="margin-top:14px" id="aiApplyBtn">${icon("plus", 18)} Añadir alimentos a ${esc(state.date)}</button>
+      </div>
+    `;
+
+    // Borrar ítems
+    $$("#aiItemsList .ai-del").forEach(btn => {
+      btn.onclick = () => {
+        btn.closest(".ai-item").remove();
+        if (!$$("#aiItemsList .ai-item").length) {
+          resultsDiv.innerHTML = emptyBox("utensils", "Todos los alimentos fueron descartados.");
+        }
+      };
+    });
+
+    // Añadir al día
+    $("#aiApplyBtn").onclick = async () => {
+      const itemsToSave = $$("#aiItemsList .ai-item").map(el => {
+        const idx = +el.dataset.idx;
+        const orig = data.items[idx] || {};
+        return {
+          name: el.querySelector(".ai-name").value.trim(),
+          grams: toNum(el.querySelector(".ai-grams").value),
+          kcal: toNum(el.querySelector(".ai-kcal").value),
+          protein: toNum(el.querySelector(".ai-p").value),
+          carbs: toNum(el.querySelector(".ai-c").value),
+          fat: toNum(el.querySelector(".ai-f").value),
+          matched_food_id: orig.matched_food_id || null
+        };
+      });
+
+      if (!itemsToSave.length) return toast("No hay alimentos que guardar");
+
+      await api("POST", "/api/ai/apply", {
+        date: state.date,
+        meal: selectedMeal(),
+        items: itemsToSave
+      });
+
+      closeSheet();
+      toast("Alimentos añadidos con Gemini", true);
+      renderToday();
+    };
+  }
+}
+
+// --- editar / duplicar / borrar entrada
 async function editEntry(id) {
   const d = await api("GET", `/api/day/${state.date}`);
   const e = d.entries.find((x) => x.id === id);
+  if (!e) return;
   const isFood = e.kind === "food" && e.food_id;
+  const isToday = state.date === isoDate(new Date());
   openSheet(`${sheetHead(e.name)}${mealChips(e.meal)}
     ${isFood ? `<label>Gramos</label><input id="eg" inputmode="decimal" value="${e.grams}"><p class="muted">Las macros se recalculan con los valores actuales del alimento.</p>` : `
     <label>Nombre</label><input id="en" value="${esc(e.name)}"><label>Kcal</label><input id="ek" inputmode="decimal" value="${e.kcal}">
-    <div class="grid4"><div><label>Prot</label><input id="ep" inputmode="decimal" value="${e.protein}"></div><div><label>Hidr</label><input id="ec" inputmode="decimal" value="${e.carbs}"></div><div><label>Grasa</label><input id="ef" inputmode="decimal" value="${e.fat}"></div></div>`}
-    <button class="btn primary" style="width:100%;margin-top:16px" id="ok">Guardar</button>
-    <button class="btn danger" style="width:100%;margin-top:8px" id="del">Eliminar</button>`);
+    <div class="grid3"><div><label>Prot</label><input id="ep" inputmode="decimal" value="${e.protein}"></div><div><label>Hidr</label><input id="ec" inputmode="decimal" value="${e.carbs}"></div><div><label>Grasa</label><input id="ef" inputmode="decimal" value="${e.fat}"></div></div>`}
+    <button class="btn primary block" style="margin-top:16px" id="ok">${icon("check", 18)} Guardar</button>
+    <div class="grid2" style="margin-top:8px">
+      <button class="btn" id="dup">${icon("copy", 17)} ${isToday ? "Duplicar" : "Copiar a hoy"}</button>
+      <button class="btn danger" id="del">${icon("trash", 17)} Eliminar</button></div>`);
   bindMealChips();
   $("#ok").onclick = async () => {
     const body = isFood ? { grams: toNum($("#eg").value), meal: selectedMeal() }
       : { name: $("#en").value, kcal: toNum($("#ek").value), protein: toNum($("#ep").value), carbs: toNum($("#ec").value), fat: toNum($("#ef").value), meal: selectedMeal() };
     await api("PUT", `/api/entries/${id}`, body); closeSheet(); renderToday();
   };
+  $("#dup").onclick = async () => { await api("POST", `/api/entries/${id}/copy`, { date: isoDate(new Date()), meal: selectedMeal() }); closeSheet(); toast(isToday ? "Duplicado" : "Copiado a hoy", true); renderToday(); };
   $("#del").onclick = async () => { await api("DELETE", `/api/entries/${id}`); closeSheet(); toast("Eliminado"); renderToday(); };
 }
 
-// -------------------------------------------------------------------- PRESETS
+// ======================================================================= PRESETS
 async function renderPresets() {
   const presets = await api("GET", "/api/presets");
   $("#view").innerHTML = `<h1>Presets</h1>
-    <p class="muted">Combinaciones que repites (ej. tu batido). Al añadirlas puedes cambiar cantidades.</p>
-    <button class="btn primary" style="width:100%;margin-bottom:12px" onclick="editPreset()">＋ Nuevo preset</button>
-    ${presets.map((p) => `<div class="card"><div class="row between"><div class="grow"><div class="title" style="font-weight:700">${esc(p.name)}</div>
-        <div class="muted">${p.items.map((i) => `${esc(i.name)} ${r0(i.grams)}g`).join(" + ") || "sin ingredientes"}</div></div>
-        <div class="kcal-tag">${r0(p.totals.kcal)} kcal</div></div>
-      <div class="row between" style="margin-top:8px">${macroLine(p.totals)}
-        <div class="row"><button class="btn small" onclick="editPreset(${p.id})">Editar</button>
-        <button class="btn small primary" onclick='state.tab="today";go("today");setTimeout(()=>addPresetById(${p.id}),50)'>Añadir hoy</button></div></div></div>`).join("") || '<div class="empty">Sin presets todavía.</div>'}`;
+    <p class="muted" style="margin-bottom:12px">Combinaciones que repites (tu batido de siempre). Al añadirlas puedes cambiar cantidades.</p>
+    <button class="btn primary block" style="margin-bottom:14px" onclick="editPreset()">${icon("plus", 18)} Nuevo preset</button>
+    ${presets.map((p) => `<div class="card"><div class="row between"><div class="row grow"><div class="thumb accent">${icon("zap", 22)}</div><div class="grow"><div class="title" style="font-size:1.05rem">${esc(p.name)}</div>
+        <div class="muted" style="white-space:normal">${p.items.map((i) => `${esc(i.name)} ${r0(i.grams)} g`).join(" · ") || "sin ingredientes"}</div></div></div>
+        <div class="kcal-tag" style="font-size:1.1rem">${r0(p.totals.kcal)}<small>kcal</small></div></div>
+      <div class="row between" style="margin-top:12px">${macroLine(p.totals)}
+        <div class="row"><button class="btn small" onclick="editPreset(${p.id})">${icon("pencil", 14)} Editar</button>
+        <button class="btn small primary" onclick="addPresetToToday(${p.id})">${icon("plus", 14)} Añadir hoy</button></div></div></div>`).join("") || emptyBox("zap", "Sin presets todavía.")}`;
 }
-async function addPresetById(id) { const p = (await api("GET", "/api/presets")).find((x) => x.id === id); pickPreset(p); }
+async function addPresetToToday(id) { state.date = isoDate(new Date()); const p = (await api("GET", "/api/presets")).find((x) => x.id === id); pickPresetThen(p); }
+function pickPresetThen(p) { go("today"); setTimeout(() => pickPreset(p), 60); }
 
 async function editPreset(id) {
   const foods = await api("GET", "/api/foods");
   const p = id ? (await api("GET", "/api/presets")).find((x) => x.id === id) : { name: "", meal: "", items: [{ food_id: foods[0]?.id, grams: 100 }] };
   const row = (it) => `<div class="preset-ing"><select>${foods.map((f) => `<option value="${f.id}" ${f.id == it.food_id ? "selected" : ""}>${esc(f.name)}${f.brand ? " – " + esc(f.brand) : ""}</option>`).join("")}</select>
-    <input inputmode="decimal" value="${it.grams}" placeholder="g"><button type="button">✕</button></div>`;
+    <input inputmode="decimal" value="${it.grams}" placeholder="g"><button type="button" class="icon-btn ghost" aria-label="Quitar">${icon("x", 18)}</button></div>`;
   openSheet(`${sheetHead(id ? "Editar preset" : "Nuevo preset")}
     <label>Nombre</label><input id="pn" value="${esc(p.name)}" placeholder="Batido de proteína">
     <label>Comida habitual (opcional)</label>${mealChips(p.meal || "")}
     <label>Ingredientes</label><div id="ings">${p.items.map(row).join("")}</div>
-    <button class="btn small" id="addIng">＋ Ingrediente</button>
-    <button class="btn primary" style="width:100%;margin-top:16px" id="ok">Guardar</button>
-    ${id ? '<button class="btn danger" style="width:100%;margin-top:8px" id="del">Eliminar preset</button>' : ""}`);
+    <button class="btn small" id="addIng">${icon("plus", 14)} Ingrediente</button>
+    <button class="btn primary block" style="margin-top:16px" id="ok">${icon("check", 18)} Guardar</button>
+    ${id ? `<button class="btn danger block" style="margin-top:8px" id="del">${icon("trash", 17)} Eliminar preset</button>` : ""}`);
   bindMealChips();
   const bindRemove = () => $$("#ings .preset-ing button").forEach((b) => b.onclick = () => b.parentElement.remove());
   bindRemove();
@@ -245,67 +604,256 @@ async function editPreset(id) {
   if (id) $("#del").onclick = async () => { if (confirm("¿Eliminar preset?")) { await api("DELETE", `/api/presets/${id}`); closeSheet(); renderPresets(); } };
 }
 
-// ------------------------------------------------------------------ ALIMENTOS
+// ===================================================================== ALIMENTOS
 async function renderFoods() {
   $("#view").innerHTML = `<h1>Alimentos</h1>
-    <button class="btn primary" style="width:100%;margin-bottom:10px" onclick="editFood()">＋ Nuevo alimento</button>
-    <input id="fq" placeholder="Buscar…" value="${esc(state.foodQuery)}"><div id="fl" style="margin-top:10px"></div>`;
+    <div class="grid2" style="margin-bottom:12px">
+      <button class="btn primary" onclick="editFood()">${icon("plus", 18)} Nuevo</button>
+      <button class="btn" onclick="onlineSearch('', null, true)">${icon("globe", 18)} Buscar online</button></div>
+    <div class="search"><span>${icon("search", 18)}</span><input id="fq" placeholder="Buscar…" value="${esc(state.foodQuery)}"></div><div id="fl" style="margin-top:12px"></div>`;
   const foods = await api("GET", "/api/foods");
   const draw = () => {
     const q = $("#fq").value.trim().toLowerCase(); state.foodQuery = $("#fq").value;
-    $("#fl").innerHTML = foods.filter((f) => !q || (f.name + " " + f.brand).toLowerCase().includes(q)).map((f) => `<div class="item" data-id="${f.id}">${thumb(f)}
-      <div class="grow"><div class="title">${esc(f.name)}${f.brand ? ` <span class="muted">${esc(f.brand)}</span>` : ""}</div>
-      <span class="macros">por 100 g · P ${r1(f.protein)} · C ${r1(f.carbs)} · G ${r1(f.fat)}</span></div><div class="kcal-tag">${r0(f.kcal)}</div></div>`).join("") || '<div class="empty">Nada por aquí.</div>';
+    $("#fl").innerHTML = foods.filter((f) => !q || (f.name + " " + f.brand).toLowerCase().includes(q)).map((f) => foodRow(f)).join("") || emptyBox("search", "Nada por aquí.");
     $$("#fl .item").forEach((el) => el.onclick = () => editFood(+el.dataset.id, foods));
   };
   $("#fq").oninput = draw; draw();
 }
 
+/** Reduce la foto antes de subirla (los móviles hacen fotos de varios MB). */
+async function shrinkImage(file, max = 800) {
+  try {
+    const bmp = await createImageBitmap(file);
+    const k = Math.min(1, max / Math.max(bmp.width, bmp.height));
+    const cv = document.createElement("canvas"); cv.width = Math.round(bmp.width * k); cv.height = Math.round(bmp.height * k);
+    cv.getContext("2d").drawImage(bmp, 0, 0, cv.width, cv.height);
+    const blob = await new Promise((r) => cv.toBlob(r, "image/jpeg", 0.85));
+    return blob ? new File([blob], "photo.jpg", { type: "image/jpeg" }) : file;
+  } catch { return file; }
+}
+
 function editFood(id, foods) {
-  const f = (foods || []).find((x) => x.id === id) || { name: "", brand: "", kcal: "", protein: "", carbs: "", fat: "", unit_g: "", unit_name: "", photo: "" };
+  const f = (foods || []).find((x) => x.id === id) || { name: "", brand: "", kcal: "", protein: "", carbs: "", fat: "", unit_g: "", unit_name: "", photo: "", barcode: "" };
   const num = (k, label) => `<div><label>${label}</label><input id="f_${k}" inputmode="decimal" value="${f[k] ?? ""}"></div>`;
   openSheet(`${sheetHead(id ? "Editar alimento" : "Nuevo alimento")}
+    <div class="row" style="margin-bottom:4px">${thumb(f)}<div class="grow"><label style="margin-top:0">Foto</label><input id="f_photo" type="file" accept="image/*"></div></div>
     <label>Nombre</label><input id="f_name" value="${esc(f.name)}"><label>Marca (opcional)</label><input id="f_brand" value="${esc(f.brand)}">
     <h2>Por cada 100 g / ml</h2>
     <div class="grid2">${num("kcal", "Kcal")}${num("protein", "Proteína (g)")}${num("carbs", "Hidratos (g)")}${num("fat", "Grasa (g)")}</div>
     <h2>Unidad (opcional)</h2>
     <div class="grid2"><div><label>Nombre (huevo, scoop…)</label><input id="f_unit_name" value="${esc(f.unit_name)}"></div>${num("unit_g", "Gramos por unidad")}</div>
-    <label>Foto</label><input id="f_photo" type="file" accept="image/*">
-    <button class="btn primary" style="width:100%;margin-top:16px" id="ok">Guardar</button>
-    ${id ? '<button class="btn danger" style="width:100%;margin-top:8px" id="del">Eliminar</button>' : ""}`);
+    <label>Código de barras (opcional)</label><input id="f_barcode" inputmode="numeric" value="${esc(f.barcode || "")}">
+    <button class="btn primary block" style="margin-top:16px" id="ok">${icon("check", 18)} Guardar</button>
+    ${id ? `<button class="btn danger block" style="margin-top:8px" id="del">${icon("trash", 17)} Eliminar</button>` : ""}`);
   $("#ok").onclick = async () => {
     const body = {};
-    ["name", "brand", "kcal", "protein", "carbs", "fat", "unit_g", "unit_name"].forEach((k) => body[k] = $("#f_" + k).value);
+    ["name", "brand", "kcal", "protein", "carbs", "fat", "unit_g", "unit_name", "barcode"].forEach((k) => body[k] = $("#f_" + k).value);
     const res = await (id ? api("PUT", `/api/foods/${id}`, body) : api("POST", "/api/foods", body));
     const file = $("#f_photo").files[0];
-    if (file) { const fd = new FormData(); fd.append("photo", file); await api("POST", `/api/foods/${id || res.id}/photo`, fd); }
+    if (file) { const fd = new FormData(); fd.append("photo", await shrinkImage(file)); await api("POST", `/api/foods/${id || res.id}/photo`, fd); }
     closeSheet(); renderFoods();
   };
   if (id) $("#del").onclick = async () => { if (confirm("¿Eliminar alimento? El histórico se conserva.")) { await api("DELETE", `/api/foods/${id}`); closeSheet(); renderFoods(); } };
 }
 
-// ------------------------------------------------------------------ HISTÓRICO
-async function renderHistory() {
-  const h = await api("GET", `/api/history?days=${state.histDays}`);
+// ===================================================================== PROGRESO
+async function renderProgress() {
+  const n = state.histDays;
+  const [h, weights] = await Promise.all([api("GET", `/api/history?days=${n}`), api("GET", "/api/weights")]);
   const g = h.goals, a = h.average;
-  const maxK = Math.max(g.kcal, ...h.days.map((d) => d.kcal), 1);
-  $("#view").innerHTML = `<h1>Histórico</h1>
-    <div class="chips">${[7, 30, 90].map((n) => `<button class="chip ${n === state.histDays ? "on" : ""}" onclick="state.histDays=${n};renderHistory()">${n} días</button>`).join("")}</div>
-    <div class="card"><div class="muted">Promedio diario · ${h.logged_days} día(s) con registros</div>
-      <div class="big" style="margin:6px 0">${r0(a.kcal)} <span class="muted">kcal</span></div>
-      <div class="macros"><b class="mp">P ${r0(a.protein)} g</b> · <b class="mc">C ${r0(a.carbs)} g</b> · <b class="mf">G ${r0(a.fat)} g</b></div></div>
-    ${h.days.map((d) => `<div class="item day-row" onclick="state.date='${d.date}';go('today')"><div class="grow">
-      <div class="row between"><div class="title" style="text-transform:capitalize">${parseISO(d.date).toLocaleDateString("es-ES", { weekday: "short", day: "numeric", month: "short" })}</div><div class="kcal-tag">${r0(d.kcal)} kcal</div></div>
-      ${macroLine(d)}<div class="bar ${d.kcal > g.kcal ? "over" : ""}"><i style="width:${(d.kcal / maxK) * 100}%;background:var(--kcal)"></i></div></div></div>`).join("") || '<div class="empty">Sin registros en este periodo.</div>'}
-    <h2>Mis objetivos diarios</h2>
+  const byDate = Object.fromEntries(h.days.map((d) => [d.date, d]));
+  const series = []; for (let i = n - 1; i >= 0; i--) { const dt = shiftDay(isoDate(new Date()), -i); series.push({ date: dt, kcal: byDate[dt]?.kcal || 0 }); }
+  const wFrom = shiftDay(isoDate(new Date()), -Math.max(n, 30));
+  const wSel = weights.filter((w) => w.date >= wFrom);
+  const lastW = weights[weights.length - 1];
+  const diff = a.kcal - g.kcal;
+  const kc = a.protein * 4 + a.carbs * 4 + a.fat * 9;
+  const share = (v) => kc ? Math.round(v / kc * 100) : 0;
+
+  $("#view").innerHTML = `<h1>Progreso</h1>
+    <div class="seg" style="margin-bottom:14px">${[7, 30, 90].map((d) => `<button class="${d === n ? "on" : ""}" onclick="state.histDays=${d};renderProgress()">${d} días</button>`).join("")}</div>
+    <div class="card">
+      <div class="muted">Promedio diario · ${h.logged_days} día(s) con registros</div>
+      <div class="row between" style="margin:8px 0 12px"><div><span class="big">${r0(a.kcal)}</span> <span class="muted">kcal</span></div>
+        ${h.logged_days ? `<div class="chip" style="cursor:default;color:${diff > 0 ? "var(--danger)" : "var(--accent)"}">${diff > 0 ? "+" : ""}${r0(diff)} vs objetivo</div>` : ""}</div>
+      ${barChart(series, g.kcal)}
+    </div>
+    <div class="card"><div class="donut-row">${donutChart(a.protein, a.carbs, a.fat)}
+      <div class="legend">
+        <div><i style="background:var(--p)"></i>Proteína · <b>${r0(a.protein)} g</b> · ${share(a.protein * 4)}%</div>
+        <div><i style="background:var(--c)"></i>Hidratos · <b>${r0(a.carbs)} g</b> · ${share(a.carbs * 4)}%</div>
+        <div><i style="background:var(--f)"></i>Grasa · <b>${r0(a.fat)} g</b> · ${share(a.fat * 9)}%</div></div></div></div>
+
+    <h2>${icon("gauge", 15)} Peso</h2>
+    <div class="card">
+      <div class="row between"><div>${lastW ? `<span class="big">${lastW.kg}</span> <span class="muted">kg · ${lastW.date}</span>` : '<span class="muted">Sin pesos apuntados</span>'}</div></div>
+      <div style="margin:10px 0">${lineChart(wSel)}</div>
+      <div class="row"><input id="wk" inputmode="decimal" placeholder="Peso de hoy (kg)" value="${lastW?.date === isoDate(new Date()) ? lastW.kg : ""}">
+        <button class="btn primary" id="saveW">${icon("check", 18)}</button></div>
+    </div>
+
+    <h2>${icon("home", 15)} Por días</h2>
+    ${h.days.map((d) => `<div class="item" onclick="state.date='${d.date}';go('today')"><div class="grow">
+      <div class="row between"><div class="title" style="text-transform:capitalize">${parseISO(d.date).toLocaleDateString("es-ES", { weekday: "short", day: "numeric", month: "short" })}</div><div class="kcal-tag">${r0(d.kcal)}<small>kcal</small></div></div>
+      ${macroLine(d)}<div class="bar ${d.kcal > g.kcal ? "over" : ""}"><i style="width:${Math.min(100, d.kcal / g.kcal * 100)}%;background:var(--kcal)"></i></div></div></div>`).join("") || emptyBox("chart", "Sin registros en este periodo.")}`;
+  $("#saveW").onclick = async () => { const kg = toNum($("#wk").value); if (!kg) return toast("Escribe tu peso"); await api("POST", "/api/weights", { date: isoDate(new Date()), kg }); toast("Peso guardado", true); renderProgress(); };
+}
+
+// ====================================================================== AJUSTES
+const ACTIVITY = [["1.2", "Sedentario (poco o nada de ejercicio)"], ["1.375", "Ligero (1-3 días/semana)"], ["1.55", "Moderado (3-5 días/semana)"], ["1.725", "Alto (6-7 días/semana)"], ["1.9", "Muy alto (trabajo físico + entreno)"]];
+const GOALS = [["-0.2", "Perder grasa (−20 %)"], ["-0.1", "Definición suave (−10 %)"], ["0", "Mantener"], ["0.1", "Ganar músculo (+10 %)"]];
+
+function setTheme(t) {
+  localStorage.setItem("theme", t);
+  const dark = t === "dark" || (t === "auto" && matchMedia("(prefers-color-scheme: dark)").matches);
+  document.documentElement.dataset.theme = dark ? "dark" : "light";
+  document.querySelector('meta[name="theme-color"]').content = dark ? "#0b0d12" : "#f3f5f9";
+  $$("#themeSeg button").forEach((b) => b.classList.toggle("on", b.dataset.t === t));
+}
+
+async function renderSettings() {
+  const [s, conn, auth, weights, ai] = await Promise.all([api("GET", "/api/settings"), api("GET", "/api/connect"), api("GET", "/api/auth/status"), api("GET", "/api/weights"), api("GET", "/api/ai/status")]);
+  const g = s.goals, p = s.profile, theme = localStorage.getItem("theme") || "dark";
+  const lastW = weights[weights.length - 1]?.kg || "";
+  const isLocalhost = ["localhost", "127.0.0.1"].includes(location.hostname);
+  $("#view").innerHTML = `<h1>Ajustes</h1>
+
+    <h2>${icon("sun", 15)} Apariencia</h2>
+    <div class="seg" id="themeSeg">${[["dark", "moon", "Oscuro"], ["light", "sun", "Claro"], ["auto", "sliders", "Auto"]].map(([t, ic, l]) => `<button data-t="${t}" class="${t === theme ? "on" : ""}">${icon(ic, 16)} ${l}</button>`).join("")}</div>
+
+    <h2>${icon("sparkles", 15)} Asistente Gemini (IA y voz)</h2>
+    <div class="card">
+      <div class="row between" style="margin-bottom:8px">
+        <span class="muted">Estado</span>
+        <span class="badge-status ${ai.configured ? "active" : "inactive"}">
+          ${ai.configured ? "● Activo (" + (ai.source === "env" ? "archivo .env" : "guardada en app") + ")" : "○ No configurada"}
+        </span>
+      </div>
+      ${ai.configured ? `<div class="url" style="color:var(--muted)">Clave: ${esc(ai.masked)}</div>` : ""}
+      <label>${ai.configured ? "Cambiar clave de API de Gemini" : "Clave de API de Gemini"}</label>
+      <input id="gemini_key" type="password" placeholder="Pega tu clave AIzaSy..." autocomplete="off">
+      <div class="grid2" style="margin-top:12px">
+        <button class="btn primary" id="saveAiKey">${icon("check", 17)} Guardar clave</button>
+        ${ai.source === "db" ? `<button class="btn danger" id="deleteAiKey">Eliminar clave</button>` : ""}
+      </div>
+      <div class="note" style="margin-top:12px">
+        ${icon("info", 18)}
+        <div>
+          <b>¿Prefieres no ponerla aquí?</b><br>
+          Crea un archivo <code>.env</code> en la carpeta de la app con la línea:<br>
+          <code>GEMINI_API_KEY=tu_clave_aqui</code><br>
+          Ese archivo está en <code>.gitignore</code> y nunca se subirá a GitHub.
+        </div>
+      </div>
+    </div>
+
+    <h2>${icon("target", 15)} Mis objetivos diarios</h2>
     <div class="card"><div class="grid2">
-      <div><label>Kcal</label><input id="g_kcal" inputmode="decimal" value="${g.kcal}"></div><div><label>Proteína (g)</label><input id="g_protein" inputmode="decimal" value="${g.protein}"></div>
+      <div><label style="margin-top:0">Kcal</label><input id="g_kcal" inputmode="decimal" value="${g.kcal}"></div><div><label style="margin-top:0">Proteína (g)</label><input id="g_protein" inputmode="decimal" value="${g.protein}"></div>
       <div><label>Hidratos (g)</label><input id="g_carbs" inputmode="decimal" value="${g.carbs}"></div><div><label>Grasa (g)</label><input id="g_fat" inputmode="decimal" value="${g.fat}"></div></div>
-      <button class="btn primary" style="width:100%;margin-top:12px" id="saveGoals">Guardar objetivos</button></div>`;
+      <button class="btn primary block" style="margin-top:14px" id="saveGoals">${icon("check", 18)} Guardar objetivos</button></div>
+
+    <h2>${icon("calc", 15)} Calculadora de macros</h2>
+    <div class="card"><p class="muted" style="margin-top:0">Calcula tus calorías con la fórmula Mifflin-St Jeor y reparte macros. Es una estimación: ajústala según tu progreso.</p>
+      <label>Sexo</label><div class="seg" id="c_sex">${[["m", "Hombre"], ["f", "Mujer"]].map(([v, l]) => `<button data-v="${v}" class="${(p.sex || "m") === v ? "on" : ""}">${l}</button>`).join("")}</div>
+      <div class="grid3"><div><label>Edad</label><input id="c_age" inputmode="numeric" value="${esc(p.age)}"></div><div><label>Altura (cm)</label><input id="c_height" inputmode="decimal" value="${esc(p.height)}"></div><div><label>Peso (kg)</label><input id="c_weight" inputmode="decimal" value="${esc(p.weight || lastW)}"></div></div>
+      <label>Actividad</label><select id="c_activity">${ACTIVITY.map(([v, l]) => `<option value="${v}" ${(p.activity || "1.55") === v ? "selected" : ""}>${l}</option>`).join("")}</select>
+      <label>Objetivo</label><select id="c_goal">${GOALS.map(([v, l]) => `<option value="${v}" ${(p.goal || "0") === v ? "selected" : ""}>${l}</option>`).join("")}</select>
+      <button class="btn block" style="margin-top:14px" id="calc">${icon("calc", 18)} Calcular</button><div id="calcRes"></div></div>
+
+    <h2>${icon("phone", 15)} Usar en el móvil</h2>
+    <div class="card">${conn.local_only ? `<div class="note">${icon("info", 18)}<div>La app está arrancada en modo <b>solo este PC</b>. Para usarla desde el móvil, ciérrala y arráncala sin <code>--local</code>.</div></div>` : conn.urls.length ? `
+      <p style="margin-top:0">Con el móvil en la <b>misma wifi</b>, escanea el código o escribe la dirección en el navegador:</p>
+      ${conn.qr ? `<div class="qr">${conn.qr}</div>` : ""}${conn.urls.map((u) => `<div class="url">${esc(u)}</div>`).join("")}
+      ${conn.pin_set ? "" : `<div class="note">${icon("lock", 18)}<div>Ahora mismo cualquiera conectado a tu wifi podría abrirla. Pon un <b>PIN</b> aquí abajo.</div></div>`}
+      <details><summary>No me abre en el móvil</summary><div class="muted" style="padding:6px 0">
+        • PC y móvil deben estar en la misma wifi (no datos móviles, ni wifi de invitados).<br>
+        • En Windows, al arrancar por primera vez pulsa <b>«Permitir acceso»</b> en el aviso del firewall (redes privadas).<br>
+        • Si el PC está en suspensión, no responde.</div></details>
+      <details><summary>Instalarla como app en el móvil</summary><div class="muted" style="padding:6px 0">
+        • <b>Android (Chrome):</b> menú ⋮ → «Añadir a pantalla de inicio».<br>
+        • <b>iPhone (Safari):</b> Compartir → «Añadir a pantalla de inicio».<br>
+        • La instalación completa como PWA (sin barra del navegador, escáner con cámara y uso offline) requiere <b>https</b>. Con <i>Tailscale</i> o <i>Cloudflare Tunnel</i> lo consigues y además la usas fuera de casa (mira el README).</div></details>`
+      : `<div class="note">${icon("info", 18)}<div>No he detectado una red local. Conecta el PC a una wifi/cable.</div></div>`}
+      ${isLocalhost ? "" : `<p class="muted">Estás conectado desde ${esc(location.host)}.</p>`}</div>
+
+    <h2>${icon("lock", 15)} Seguridad</h2>
+    <div class="card"><p class="muted" style="margin-top:0">${auth.pin_set ? "PIN activo: cada dispositivo lo pedirá una vez." : "Sin PIN. Recomendado si usas la app desde el móvil o fuera de casa."}</p>
+      ${auth.pin_set ? `<label>PIN actual</label><input id="pin_cur" type="password" inputmode="numeric" autocomplete="off">` : ""}
+      <label>${auth.pin_set ? "Nuevo PIN" : "PIN (mínimo 4)"}</label><input id="pin_new" type="password" inputmode="numeric" autocomplete="new-password">
+      <div class="grid2" style="margin-top:12px"><button class="btn primary" id="pinSave">${icon("lock", 17)} ${auth.pin_set ? "Cambiar" : "Activar"}</button>
+      ${auth.pin_set ? `<button class="btn danger" id="pinOff">Quitar PIN</button>` : ""}</div></div>
+
+    <h2>${icon("download", 15)} Copia de seguridad</h2>
+    <div class="card"><p class="muted" style="margin-top:0">La copia incluye alimentos, presets, historial, peso, objetivos y fotos. Úsala para mover tus datos a otro PC.</p>
+      <div class="grid2"><a class="btn" href="/api/export" download>${icon("download", 17)} Copia (.json)</a><a class="btn" href="/api/export.csv" download>${icon("download", 17)} Historial (.csv)</a></div>
+      <button class="btn block" style="margin-top:8px" id="restore">${icon("upload", 17)} Restaurar copia…</button><input id="restoreFile" type="file" accept=".json,application/json" class="hidden"></div>
+
+    <p class="muted" style="text-align:center;margin-top:24px">Macros · tus datos viven en tu PC · <a style="color:var(--accent)" href="https://github.com/ivangarmir18/Calculadora_Macros" target="_blank" rel="noopener">GitHub</a></p>`;
+
+  $$("#themeSeg button").forEach((b) => b.onclick = () => setTheme(b.dataset.t));
+  $$("#c_sex button").forEach((b) => b.onclick = () => { $$("#c_sex button").forEach((x) => x.classList.remove("on")); b.classList.add("on"); });
   $("#saveGoals").onclick = async () => {
-    await api("PUT", "/api/settings", Object.fromEntries(["kcal", "protein", "carbs", "fat"].map((k) => [k, toNum($("#g_" + k).value)])));
-    toast("Objetivos guardados ✓"); renderHistory();
+    await api("PUT", "/api/settings", { goals: Object.fromEntries(["kcal", "protein", "carbs", "fat"].map((k) => [k, toNum($("#g_" + k).value)])) });
+    toast("Objetivos guardados", true);
+  };
+  $("#saveAiKey").onclick = async () => {
+    const k = $("#gemini_key").value.trim();
+    if (!k) return toast("Introduce una clave válida");
+    await api("POST", "/api/ai/key", { key: k });
+    toast("Clave de Gemini guardada", true);
+    renderSettings();
+  };
+  $("#deleteAiKey")?.addEventListener("click", async () => {
+    await api("POST", "/api/ai/key", { key: "" });
+    toast("Clave eliminada", true);
+    renderSettings();
+  });
+  $("#calc").onclick = () => {
+    const sex = $("#c_sex .on").dataset.v, age = toNum($("#c_age").value), h = toNum($("#c_height").value), w = toNum($("#c_weight").value);
+    if (!age || !h || !w) return toast("Rellena edad, altura y peso");
+    const act = toNum($("#c_activity").value), adj = toNum($("#c_goal").value);
+    const bmr = 10 * w + 6.25 * h - 5 * age + (sex === "m" ? 5 : -161);
+    const kcal = Math.round(bmr * act * (1 + adj) / 10) * 10;
+    const protein = Math.round(w * (adj < 0 ? 2.2 : 1.8)), fat = Math.round(kcal * 0.25 / 9);
+    const carbs = Math.max(0, Math.round((kcal - protein * 4 - fat * 9) / 4));
+    $("#calcRes").innerHTML = `<div class="result"><div class="muted">Metabolismo basal ${r0(bmr)} kcal · mantenimiento ${r0(bmr * act)} kcal</div>
+      <div class="big" style="margin:6px 0;color:var(--kcal)">${kcal} <span class="muted">kcal/día</span></div>
+      <div class="macros"><b class="mp">Proteína ${protein} g</b> · <b class="mc">Hidratos ${carbs} g</b> · <b class="mf">Grasa ${fat} g</b></div>
+      <button class="btn primary block" style="margin-top:12px" id="useCalc">${icon("check", 18)} Usar como mis objetivos</button></div>`;
+    $("#useCalc").onclick = async () => {
+      await api("PUT", "/api/settings", { goals: { kcal, protein, carbs, fat }, profile: { sex, age, height: h, weight: w, activity: act, goal: adj } });
+      toast("Objetivos actualizados", true); renderSettings();
+    };
+  };
+  $("#pinSave").onclick = async () => {
+    const r = await api("POST", "/api/auth/pin", { pin: $("#pin_new").value, current: $("#pin_cur")?.value || "" });
+    toast(r.pin_set ? "PIN activado" : "PIN quitado", true); renderSettings();
+  };
+  $("#pinOff")?.addEventListener("click", async () => { await api("POST", "/api/auth/pin", { pin: "", current: $("#pin_cur").value }); toast("PIN quitado", true); renderSettings(); });
+  $("#restore").onclick = () => $("#restoreFile").click();
+  $("#restoreFile").onchange = async (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    if (!confirm("Restaurar REEMPLAZA todos los datos actuales por los de la copia. ¿Continuar?")) return;
+    const fd = new FormData(); fd.append("file", file);
+    await api("POST", "/api/import", fd); toast("Copia restaurada", true); renderSettings();
   };
 }
 
-render();
+// ======================================================================== LOGIN
+function renderLogin() {
+  document.body.classList.add("locked");
+  $("#view").innerHTML = `<div class="login"><div class="logo">${icon("lock", 44)}</div><h1>Macros</h1><p class="muted">Introduce tu PIN</p>
+    <input id="lp" type="password" inputmode="numeric" autocomplete="current-password" style="text-align:center;font-size:1.4rem;letter-spacing:.3em;margin:14px 0" autofocus>
+    <button class="btn primary block" id="lg">Entrar</button></div>`;
+  const go_ = async () => { try { await api("POST", "/api/auth/login", { pin: $("#lp").value }); buildNav(); render(); } catch { $("#lp").value = ""; $("#lp").focus(); } };
+  $("#lg").onclick = go_; $("#lp").addEventListener("keydown", (e) => { if (e.key === "Enter") go_(); }); $("#lp").focus();
+}
+
+// ======================================================================== ARRANQUE
+(async function boot() {
+  buildNav();
+  if ("serviceWorker" in navigator && window.isSecureContext) navigator.serviceWorker.register("/sw.js").catch(() => {});
+  try { const a = await api("GET", "/api/auth/status"); if (a.pin_set && !a.authed) return renderLogin(); } catch { return; }
+  render();
+})();
