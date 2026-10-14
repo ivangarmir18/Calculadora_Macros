@@ -28,12 +28,20 @@ Opciones de arranque:
 
 ---
 
-## 📱 Cómo conectar el móvil
+## 📱 Cómo usarla en el móvil
 
-1. Asegúrate de que tu móvil y el PC están en la **misma red Wi-Fi**.
-2. Entra en la app desde el PC y ve a la pestaña **Ajustes** -> **Usar en el móvil**.
-3. Verás un **código QR** y la dirección IP local (ej. `http://192.168.1.50:5000`).
-4. Escanea el código con la cámara del móvil y listo.
+### En casa (misma red Wi-Fi)
+1. Arranca con `start.bat`.
+2. Ve a **Ajustes** -> **Usar en el móvil** y escanea el código QR o entra a la IP local (ej. `http://192.168.1.50:5000`).
+
+### Fuera de casa (con datos móviles 4G/5G o en cualquier otra red)
+- **Método 1 (En 1 clic con `start_online.bat`)**:
+  Haz doble clic en **`start_online.bat`**.
+  Crea un túnel seguro con **HTTPS** (usando Cloudflare Tunnel gratuito, sin registrarse ni abrir puertos).
+  Te dará un enlace `https://xxxx.trycloudflare.com` que puedes abrir en el móvil desde donde estés.
+
+- **Método 2 (En la nube 24/7 sin dejar el PC encendido)**:
+  En [render.com](https://render.com) o [railway.app](https://railway.app), conecta tu repositorio de GitHub recién subido y tendrás la app siempre activa con URL propia.
 
 > **💡 Consejo PWA:** En tu navegador del móvil puedes pulsar en "Añadir a pantalla de inicio" para tenerla como una app nativa con icono propio.
 

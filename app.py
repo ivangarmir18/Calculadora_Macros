@@ -950,7 +950,8 @@ init_db()
 # ------------------------------------------------------------------ arranque
 def main():
     ap = argparse.ArgumentParser(description="Calculadora de macros")
-    ap.add_argument("--port", type=int, default=int(os.environ.get("MACROS_PORT", 5000)))
+    default_port = int(os.environ.get("PORT") or os.environ.get("MACROS_PORT", 5000))
+    ap.add_argument("--port", type=int, default=default_port)
     ap.add_argument("--local", action="store_true", help="solo accesible desde este PC (no desde el móvil)")
     ap.add_argument("--no-browser", action="store_true", help="no abrir el navegador al arrancar")
     args = ap.parse_args()
