@@ -670,7 +670,15 @@ def put_settings():
 def ai_status():
     with get_conn() as conn:
         key, source = gemini.get_gemini_api_key(conn)
-        return jsonify(configured=bool(key), masked=gemini.mask_api_key(key), source=source)
+        model, m_source = gemini.get_gemini_model(conn)
+        return jsonify(
+            configured=bool(key),
+            masked=gemini.mask_api_key(key),
+            source=source,
+            model=model,
+            model_source=m_source,
+            available_models=gemini.MODELS,
+        )
 
 
 @app.post("/api/ai/key")
@@ -683,7 +691,28 @@ def ai_set_key():
         else:
             set_setting(conn, "gemini_api_key", key)
         k, source = gemini.get_gemini_api_key(conn)
-        return jsonify(ok=True, configured=bool(k), masked=gemini.mask_api_key(k), source=source)
+        model, m_source = gemini.get_gemini_model(conn)
+        return jsonify(
+            ok=True,
+            configured=bool(k),
+            masked=gemini.mask_api_key(k),
+            source=source,
+            model=model,
+            model_source=m_source,
+        )
+
+
+@app.post("/api/ai/model")
+def ai_set_model():
+    d = request.get_json(force=True) or {}
+    model = str(d.get("model", "")).strip()
+    with get_conn() as conn:
+        if not model:
+            conn.execute("DELETE FROM settings WHERE key='gemini_model'")
+        else:
+            set_setting(conn, "gemini_model", model)
+        m, source = gemini.get_gemini_model(conn)
+        return jsonify(ok=True, model=m, source=source)
 
 
 @app.post("/api/ai/parse")
@@ -692,6 +721,8 @@ def ai_parse():
         key, _ = gemini.get_gemini_api_key(conn)
         if not key:
             abort(400, "Configura tu clave de API de Gemini en Ajustes o en el archivo .env")
+
+        model, _ = gemini.get_gemini_model(conn)
 
         # Catálogo de alimentos para que Gemini pueda emparejar
         foods = rows(conn.execute("SELECT id, name, brand, kcal, protein, carbs, fat, unit_g, unit_name FROM foods ORDER BY name"))
@@ -739,6 +770,7 @@ def ai_parse():
             image_bytes=image_bytes,
             image_mime=image_mime,
             foods_catalog=foods,
+            preferred_model=model,
         )
         return jsonify(result)
     except gemini.GeminiError as e:

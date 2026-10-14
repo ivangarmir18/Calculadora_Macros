@@ -397,85 +397,276 @@ function addQuick() {
 }
 
 // --- Asistente Gemini (texto, voz, foto)
+// --- Asistente Gemini (audio de voz hasta 2 min, texto, foto)
 function openAiSheet() {
   let attachedImage = null;
+  let mediaStream = null;
+  let mediaRecorder = null;
+  let recordedChunks = [];
+  let audioBlob = null;
+  let audioBase64 = null;
+  let audioMime = "audio/webm";
+  let audioDurationSec = 0;
+  let recordTimer = null;
+  let recordSeconds = 0;
   let isRecording = false;
-  let recognition = null;
-  const hasSpeech = "webkitSpeechRecognition" in window || "SpeechRecognition" in window;
+  const MAX_RECORD_SECONDS = 120; // 2 minutos máximo
+
+  function formatTime(s) {
+    const m = Math.floor(s / 60);
+    const rem = s % 60;
+    return `${m.toString().padStart(2, "0")}:${rem.toString().padStart(2, "0")}`;
+  }
+
+  function getBestAudioMimeType() {
+    if (!window.MediaRecorder) return "";
+    const candidates = [
+      "audio/webm;codecs=opus",
+      "audio/webm",
+      "audio/mp4",
+      "audio/aac",
+      "audio/ogg;codecs=opus",
+      "audio/wav",
+    ];
+    for (const c of candidates) {
+      try {
+        if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(c)) {
+          return c;
+        }
+      } catch {}
+    }
+    return "";
+  }
 
   openSheet(`
     ${sheetHead("Asistente Gemini")}
-    <p class="muted" style="margin-top:0">Dile o escribe lo que has comido, o añade una foto de tu plato o etiqueta.</p>
+    <p class="muted" style="margin-top:0">Graba una nota de voz (hasta 2 min), escribe lo que has comido o sube una foto de tu plato o etiqueta.</p>
     ${mealChips(guessMeal())}
+
+    <!-- Sección de Audio / Voz -->
+    <div id="aiAudioSection" style="margin:10px 0"></div>
+
     <div style="margin:8px 0">
-      <textarea id="aiInput" rows="3" style="width:100%;resize:vertical" placeholder="Ej: He comido 200g de pechuga a la plancha, un bol de arroz y una manzana... o pulsa el micro"></textarea>
+      <textarea id="aiInput" rows="2" style="width:100%;resize:vertical" placeholder="Detalles opcionales o escribe aquí si prefieres no usar voz (ej: ensalada con atún, huevo, tomate...)"></textarea>
     </div>
+
     <div id="aiAttachWrap" class="hidden"></div>
+
     <div class="row" style="gap:8px;margin-bottom:12px">
-      <button type="button" class="btn small" id="aiVoiceBtn">${icon("mic", 16)} <span id="aiVoiceLabel">Dictar por voz</span></button>
-      <button type="button" class="btn small" id="aiPhotoBtn">${icon("camera", 16)} Foto</button>
+      <button type="button" class="btn small" id="aiPhotoBtn">${icon("camera", 16)} Adjuntar foto de comida</button>
       <input type="file" id="aiPhotoInput" accept="image/*" class="hidden">
     </div>
-    <button class="btn primary block" id="aiSubmit">${icon("sparkles", 18)} Analizar con Gemini</button>
+
+    <button class="btn primary block" id="aiSubmit" style="font-size:1.02rem;padding:13px">${icon("sparkles", 18)} Analizar con Gemini</button>
     <div id="aiResults"></div>
   `, {
     onClose: () => {
-      if (recognition && isRecording) { try { recognition.stop(); } catch {} }
+      cleanupRecording();
     }
   });
 
   bindMealChips();
   const inp = $("#aiInput");
-  inp.focus();
+  const audioSection = $("#aiAudioSection");
 
-  // Gestión de voz con Web Speech API
-  const voiceBtn = $("#aiVoiceBtn");
-  const voiceLabel = $("#aiVoiceLabel");
+  function cleanupRecording() {
+    if (recordTimer) {
+      clearInterval(recordTimer);
+      recordTimer = null;
+    }
+    if (mediaRecorder && isRecording) {
+      try { mediaRecorder.stop(); } catch {}
+    }
+    if (mediaStream) {
+      try { mediaStream.getTracks().forEach(t => t.stop()); } catch {}
+      mediaStream = null;
+    }
+    isRecording = false;
+  }
 
-  if (hasSpeech) {
-    const SpeechClass = window.SpeechRecognition || window.webkitSpeechRecognition;
-    recognition = new SpeechClass();
-    recognition.lang = "es-ES";
-    recognition.continuous = true;
-    recognition.interimResults = true;
-
-    recognition.onresult = (event) => {
-      let finalTranscript = "";
-      for (let i = event.resultIndex; i < event.results.length; ++i) {
-        if (event.results[i].isFinal) {
-          finalTranscript += event.results[i][0].transcript + " ";
-        }
+  function renderAudioState() {
+    if (isRecording) {
+      audioSection.innerHTML = `
+        <div class="audio-recorder">
+          <div class="rec-live">
+            <div class="row" style="gap:8px">
+              <div class="rec-dot"></div>
+              <span class="rec-timer" id="recTimerText">${formatTime(recordSeconds)} / ${formatTime(MAX_RECORD_SECONDS)}</span>
+            </div>
+            <div class="rec-waves">
+              <div class="rec-wave-bar"></div>
+              <div class="rec-wave-bar"></div>
+              <div class="rec-wave-bar"></div>
+              <div class="rec-wave-bar"></div>
+              <div class="rec-wave-bar"></div>
+            </div>
+          </div>
+          <div class="grid2" style="margin-top:6px">
+            <button type="button" class="btn primary small" id="stopRecBtn">${icon("check", 16)} Terminar y usar audio</button>
+            <button type="button" class="btn danger small" id="cancelRecBtn">${icon("x", 16)} Cancelar</button>
+          </div>
+        </div>
+      `;
+      $("#stopRecBtn").onclick = () => stopRecording(true);
+      $("#cancelRecBtn").onclick = () => stopRecording(false);
+    } else if (audioBase64) {
+      audioSection.innerHTML = `
+        <div class="audio-card">
+          <div class="row" style="gap:10px;flex:1;min-width:0">
+            <div class="thumb accent" style="width:42px;height:42px;color:var(--accent);background:color-mix(in srgb, var(--accent) 15%, var(--card2))">
+              ${icon("audioLines", 22)}
+            </div>
+            <div class="grow" style="min-width:0">
+              <div class="title" style="font-size:.9rem;font-weight:700">Nota de voz lista (${formatTime(audioDurationSec)})</div>
+              <div class="muted" style="font-size:.78rem;color:var(--accent)">Audio preparado para enviar a Gemini</div>
+            </div>
+          </div>
+          <div class="row" style="gap:6px;flex:none">
+            <button type="button" class="btn small" id="playAudioBtn" title="Reproducir">${icon("play", 15)} Escuchar</button>
+            <button type="button" class="icon-btn ghost" id="discardAudioBtn" title="Borrar audio y volver a grabar">${icon("trash", 17)}</button>
+          </div>
+        </div>
+        <audio id="audioPreviewPlayer" class="hidden" preload="auto"></audio>
+      `;
+      const player = $("#audioPreviewPlayer");
+      if (player && audioBlob) {
+        player.src = URL.createObjectURL(audioBlob);
       }
-      if (finalTranscript) {
-        inp.value = (inp.value ? inp.value.trim() + " " : "") + finalTranscript.trim();
+      let isPlaying = false;
+      const playBtn = $("#playAudioBtn");
+      playBtn.onclick = () => {
+        if (!player) return;
+        if (isPlaying) {
+          player.pause();
+          player.currentTime = 0;
+          isPlaying = false;
+          playBtn.innerHTML = `${icon("play", 15)} Escuchar`;
+        } else {
+          player.play();
+          isPlaying = true;
+          playBtn.innerHTML = `${icon("square", 15)} Parar`;
+        }
+      };
+      if (player) {
+        player.onended = () => {
+          isPlaying = false;
+          playBtn.innerHTML = `${icon("play", 15)} Escuchar`;
+        };
+      }
+      $("#discardAudioBtn").onclick = () => {
+        if (player) { try { player.pause(); } catch {} }
+        audioBlob = null;
+        audioBase64 = null;
+        audioDurationSec = 0;
+        renderAudioState();
+      };
+    } else {
+      audioSection.innerHTML = `
+        <button type="button" class="btn block" id="startRecBtn" style="background:color-mix(in srgb, #ef4444 8%, var(--card2));border-color:color-mix(in srgb, #ef4444 32%, var(--line));padding:13px 14px;display:flex;align-items:center;justify-content:center;gap:10px">
+          ${icon("mic", 20, "pulsing-icon")}
+          <div style="text-align:left">
+            <div style="font-weight:700;font-size:.92rem;color:var(--text)">Grabar nota de voz (hasta 2 min)</div>
+            <div class="muted" style="font-size:.76rem">Explica tu plato con tranquilidad (ensaladas, cantidades, aliño...)</div>
+          </div>
+        </button>
+      `;
+      $("#startRecBtn").onclick = startRecording;
+    }
+  }
+
+  async function startRecording() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      return toast("Tu navegador no soporta grabación directa de audio.");
+    }
+    try {
+      mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (err) {
+      return toast("No se pudo acceder al micrófono: " + (err.message || "Permiso denegado"));
+    }
+
+    recordedChunks = [];
+    const bestMime = getBestAudioMimeType();
+    const options = bestMime ? { mimeType: bestMime } : {};
+    try {
+      mediaRecorder = new MediaRecorder(mediaStream, options);
+    } catch {
+      // Fallback sin opciones si el mimeType falló en este navegador
+      try {
+        mediaRecorder = new MediaRecorder(mediaStream);
+      } catch (err2) {
+        return toast("Error al iniciar grabadora: " + err2.message);
+      }
+    }
+
+    audioMime = mediaRecorder.mimeType || bestMime || "audio/webm";
+    mediaRecorder.ondataavailable = (e) => {
+      if (e.data && e.data.size > 0) {
+        recordedChunks.push(e.data);
       }
     };
 
-    recognition.onerror = () => stopVoice();
-    recognition.onend = () => { if (isRecording) stopVoice(); };
-  } else {
-    voiceBtn.title = "Tu navegador no soporta dictado directo por voz";
-  }
+    mediaRecorder.onstop = () => {
+      if (mediaStream) {
+        try { mediaStream.getTracks().forEach(t => t.stop()); } catch {}
+        mediaStream = null;
+      }
+      if (recordTimer) {
+        clearInterval(recordTimer);
+        recordTimer = null;
+      }
+      isRecording = false;
 
-  function startVoice() {
-    if (!hasSpeech) return toast("Tu navegador no soporta dictado por voz");
+      if (recordedChunks.length > 0 && recordSeconds > 0) {
+        audioDurationSec = recordSeconds;
+        audioBlob = new Blob(recordedChunks, { type: audioMime });
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const res = reader.result;
+          audioBase64 = typeof res === "string" ? res.split(",")[1] : null;
+          renderAudioState();
+        };
+        reader.readAsDataURL(audioBlob);
+      } else {
+        renderAudioState();
+      }
+    };
+
+    recordSeconds = 0;
     isRecording = true;
-    voiceBtn.classList.add("pulsing");
-    voiceLabel.textContent = "Escuchando...";
-    try { recognition.start(); } catch {}
+    mediaRecorder.start(250); // trozos cada 250ms
+    renderAudioState();
+
+    recordTimer = setInterval(() => {
+      recordSeconds++;
+      const timerEl = $("#recTimerText");
+      if (timerEl) {
+        timerEl.textContent = `${formatTime(recordSeconds)} / ${formatTime(MAX_RECORD_SECONDS)}`;
+      }
+      if (recordSeconds >= MAX_RECORD_SECONDS) {
+        toast("Límite de 2 minutos alcanzado");
+        stopRecording(true);
+      }
+    }, 1000);
   }
 
-  function stopVoice() {
-    isRecording = false;
-    voiceBtn.classList.remove("pulsing");
-    voiceLabel.textContent = "Dictar por voz";
-    try { recognition.stop(); } catch {}
+  function stopRecording(save) {
+    if (!isRecording) return;
+    if (!save) {
+      recordedChunks = [];
+      recordSeconds = 0;
+      audioBlob = null;
+      audioBase64 = null;
+    }
+    if (mediaRecorder && mediaRecorder.state !== "inactive") {
+      try { mediaRecorder.stop(); } catch {}
+    } else {
+      cleanupRecording();
+      renderAudioState();
+    }
   }
 
-  voiceBtn.onclick = () => {
-    if (isRecording) stopVoice();
-    else startVoice();
-  };
+  // Render inicial del estado de audio
+  renderAudioState();
 
   // Adjuntar foto
   const photoBtn = $("#aiPhotoBtn");
@@ -512,15 +703,23 @@ function openAiSheet() {
   const resultsDiv = $("#aiResults");
 
   submitBtn.onclick = async () => {
-    stopVoice();
+    if (isRecording) {
+      stopRecording(true);
+      // Dar una pequeña fracción de segundo para que procese el blob
+      await new Promise(r => setTimeout(r, 300));
+    }
+
     const textVal = inp.value.trim();
-    if (!textVal && !attachedImage) {
-      return toast("Escribe lo que has comido o adjunta una foto");
+    if (!audioBase64 && !textVal && !attachedImage) {
+      return toast("Graba una nota de voz, escribe lo que has comido o añade una foto");
     }
 
     submitBtn.disabled = true;
+    const loadingMsg = audioBase64
+      ? "Escuchando audio y calculando macros con Gemini..."
+      : "Analizando alimentos y calculando macros...";
     submitBtn.innerHTML = `${icon("sparkles", 18, "spin")} Consultando a Gemini...`;
-    resultsDiv.innerHTML = `<div class="empty small">${icon("sparkles", 26, "spin")}Analizando alimentos y calculando macros...</div>`;
+    resultsDiv.innerHTML = `<div class="empty small">${icon("sparkles", 26, "spin")}${loadingMsg}</div>`;
 
     try {
       let image_b64 = null, image_mime = null;
@@ -531,6 +730,8 @@ function openAiSheet() {
 
       const res = await api("POST", "/api/ai/parse", {
         text: textVal,
+        audio_b64: audioBase64 || null,
+        audio_mime: audioBase64 ? audioMime : null,
         image_b64,
         image_mime,
       });
@@ -546,7 +747,7 @@ function openAiSheet() {
 
   function renderAiResults(data) {
     if (!data.items || !data.items.length) {
-      resultsDiv.innerHTML = `<div class="empty small">Gemini no ha detectado alimentos claros. Prueba a dar más detalles.</div>`;
+      resultsDiv.innerHTML = `<div class="empty small">Gemini no ha detectado alimentos claros. Prueba a dar más detalles en tu audio o texto.</div>`;
       return;
     }
 
@@ -578,11 +779,20 @@ function openAiSheet() {
         <div class="row between">
           <div>
             <strong>${esc(data.summary || "Alimentos detectados")}</strong>
-            <div class="muted">${data.items.length} alimento(s) detectado(s)</div>
+            <div class="muted">${data.items.length} ingrediente(s) identificado(s)</div>
           </div>
-          <div class="kcal-tag" style="font-size:1.2rem">${r0(data.total_kcal || 0)}<small>kcal</small></div>
+          <div class="kcal-tag" style="font-size:1.25rem">${r0(data.total_kcal || 0)}<small>kcal</small></div>
         </div>
+
+        ${data.transcription ? `
+          <div class="ai-transcript">
+            <strong>${icon("audioLines", 14)} Lo que he escuchado:</strong>
+            ${esc(data.transcription)}
+          </div>
+        ` : ""}
+
         ${data.notes ? `<p class="muted" style="margin:6px 0;font-size:.82rem">${esc(data.notes)}</p>` : ""}
+
         <div id="aiItemsList" style="margin-top:10px">${itemsHtml}</div>
         <button class="btn primary block" style="margin-top:14px" id="aiApplyBtn">${icon("plus", 18)} Añadir alimentos a ${esc(state.date)}</button>
       </div>
@@ -985,12 +1195,25 @@ async function renderSettings() {
         <button class="btn primary" id="saveAiKey">${icon("check", 17)} Guardar clave</button>
         ${ai.source === "db" ? `<button class="btn danger" id="deleteAiKey">Eliminar clave</button>` : ""}
       </div>
+      <label style="margin-top:14px">Modelo de Gemini</label>
+      <div class="row" style="gap:8px">
+        <select id="gemini_model" style="flex:1">
+          ${(ai.available_models || ["gemini-3.8-flash", "gemini-3-flash", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]).map(m => `
+            <option value="${m}" ${m === ai.model ? "selected" : ""}>${esc(m)} ${m === "gemini-3.8-flash" ? "★ Recomendado" : ""}</option>
+          `).join("")}
+        </select>
+        <button type="button" class="btn" id="saveAiModel" style="flex:none">${icon("check", 16)} Cambiar</button>
+      </div>
+      <div class="muted" style="font-size:.78rem;margin-top:4px">
+        Modelo prioritario: <b>${esc(ai.model || "gemini-3.8-flash")}</b> (${ai.model_source === "env" ? "archivo .env" : ai.model_source === "db" ? "guardado" : "por defecto"}). Si no está activo en tu cuenta, salta automáticamente al siguiente modelo de respaldo.
+      </div>
       <div class="note" style="margin-top:12px">
         ${icon("info", 18)}
         <div>
           <b>¿Prefieres no ponerla aquí?</b><br>
           Crea un archivo <code>.env</code> en la carpeta de la app con la línea:<br>
           <code>GEMINI_API_KEY=tu_clave_aqui</code><br>
+          (Opcional: <code>GEMINI_MODEL=gemini-3.8-flash</code>)<br>
           Ese archivo está en <code>.gitignore</code> y nunca se subirá a GitHub.
         </div>
       </div>
@@ -1079,6 +1302,14 @@ async function renderSettings() {
     await api("POST", "/api/ai/key", { key: "" });
     toast("Clave eliminada", true);
     renderSettings();
+  });
+  $("#saveAiModel")?.addEventListener("click", async () => {
+    const m = $("#gemini_model")?.value;
+    if (m) {
+      await api("POST", "/api/ai/model", { model: m });
+      toast("Modelo preferido: " + m, true);
+      renderSettings();
+    }
   });
   $("#calc").onclick = () => {
     const sex = $("#c_sex .on").dataset.v, age = toNum($("#c_age").value), h = toNum($("#c_height").value), w = toNum($("#c_weight").value);

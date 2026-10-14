@@ -39,14 +39,14 @@ Opciones de arranque:
 
 ---
 
-## 🤖 Asistente Gemini (IA, Voz y Fotos)
+## 🤖 Asistente Gemini (IA, Notas de Voz y Fotos)
 
-Puedes añadir comidas hablándole con tu voz, escribiendo en lenguaje natural o subiendo fotos:
+Puedes añadir comidas grabando una nota de voz con tu propio audio, escribiendo en lenguaje natural o subiendo fotos:
 
-- **Dictado por voz**: Pulsa en el botón del micrófono y di por ejemplo: *"He comido 200 gramos de pechuga a la plancha, un bol de arroz y una manzana"*.
+- **Notas de voz (hasta 2 min)**: Pulsa en "Grabar nota de voz" y habla tranquilamente. Puedes explicar recetas con muchos ingredientes (por ejemplo: una ensalada enorme con lechuga, atún, huevo, tomate, cebolla, nueces y tu chorro de aceite de oliva). Gemini procesa el audio completo de forma multimodal, muestra en pantalla la transcripción de lo que entendió, desglosa cada ingrediente y calcula las macros exactas.
 - **Fotos**: Saca una foto a tu plato o a la etiqueta nutricional de un producto.
 - **Emparejamiento inteligente**: Si el alimento ya está en tu base de datos personal, Gemini lo detecta y usa tus macros exactas. Si es nuevo, calcula una estimación realista.
-- **Revisión antes de guardar**: Antes de añadir a tu día, puedes ajustar los gramos o macros en la vista previa.
+- **Revisión antes de guardar**: Antes de añadir a tu día, puedes revisar la transcripción, ajustar los gramos o macros de cualquier ingrediente en la vista previa o descartar los que no quieras.
 
 ### 🔑 Dónde poner tu clave de Gemini (y cómo ocultarla)
 
@@ -63,6 +63,7 @@ Tienes **dos formas seguras** de configurar tu API Key sin que nadie la vea y si
    - Añade la línea:
      ```env
      GEMINI_API_KEY=tu_clave_de_gemini_aqui
+     GEMINI_MODEL=gemini-3.8-flash  # Opcional (por defecto gemini-3.8-flash)
      ```
    - **Garantía de seguridad**: El archivo `.env` está en `.gitignore`, por lo que **nunca se subirá a git ni a GitHub**.
 

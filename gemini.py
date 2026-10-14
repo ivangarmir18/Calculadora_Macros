@@ -14,8 +14,15 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 
-# Modelos recomendados de Gemini con fallback
-MODELS = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+# Modelos de Gemini con fallback inteligente (priorizando Gemini 3.8 Flash)
+MODELS = [
+    "gemini-3.8-flash",
+    "gemini-3-flash",
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+    "gemini-1.5-pro",
+]
 
 
 def load_env_file():
@@ -53,6 +60,35 @@ def get_gemini_api_key(conn=None):
     return "", "none"
 
 
+def get_gemini_model(conn=None):
+    """Obtiene el modelo de Gemini preferido con la siguiente prioridad:
+    1. Variable de entorno GEMINI_MODEL (o de .env)
+    2. Base de datos SQLite (tabla settings: gemini_model)
+    3. 'gemini-3.8-flash' (por defecto)
+    """
+    model = os.environ.get("GEMINI_MODEL", "").strip()
+    if model:
+        return model, "env"
+
+    if conn is not None:
+        r = conn.execute("SELECT value FROM settings WHERE key='gemini_model'").fetchone()
+        if r and r["value"].strip():
+            return r["value"].strip(), "db"
+
+    return "gemini-3.8-flash", "default"
+
+
+def get_models_list(preferred_model=None):
+    """Devuelve la lista ordenada de modelos con el preferido al frente."""
+    models = list(MODELS)
+    if preferred_model and preferred_model.strip():
+        m = preferred_model.strip()
+        if m in models:
+            models.remove(m)
+        models.insert(0, m)
+    return models
+
+
 def mask_api_key(key):
     """Devuelve la clave ofuscada para mostrar en la interfaz de forma segura."""
     if not key:
@@ -66,19 +102,45 @@ class GeminiError(Exception):
     pass
 
 
-SYSTEM_INSTRUCTION = """Eres un asistente nutricional experto y preciso.
-Tu objetivo es analizar lo que el usuario ha comido a partir de texto en lenguaje natural, audio de voz o fotos de platos/etiquetas, y desglosarlo en alimentos con sus macros y calorías estimadas.
+SYSTEM_INSTRUCTION = """Eres un asistente nutricional experto, empático y de máxima precisión.
+Tu objetivo es analizar lo que el usuario ha consumido a partir de texto en lenguaje natural, notas de voz grabadas (incluso audios extensos de 1 a 2 minutos) o fotos de platos y etiquetas, desglosando cada ingrediente con sus gramos y macros (kcal, proteínas, carbohidratos, grasas).
 
-Reglas:
-1. Identifica cada alimento o componente por separado.
-2. Si el usuario te proporciona una lista de "alimentos registrados" en su base de datos y alguno de los alimentos consumidos coincide claramente (ej. "leche desnatada", "pechuga de pollo", "arroz"), utiliza ese alimento, asigna su "matched_food_id" correspondiente y calcula las macros proporcionales a los gramos o unidades consumidos.
-3. Si un alimento NO está en su base de datos, estima de forma realista: nombre, gramos aproximados de la ración y sus macros (kcal, protein, carbs, fat por esa ración).
-4. Si el usuario solo menciona algo genérico como "fui a un cumple y comí algo de picoteo", desglósalo en los componentes aproximados o en un ítem representativo con calorías realistas.
-5. Intenta sugerir la comida del día más probable ("desayuno", "comida", "merienda", "cena", "otro") según el contexto o alimentos.
-6. Devuelve SIEMPRE y ÚNICAMENTE un objeto JSON válido con este formato:
+DIRECTRICES FUNDAMENTALES:
+1. NOTAS DE VOZ EXTENSAS Y DETALLADAS:
+   - Escucha e interpreta la TOTALIDAD del audio con paciencia, incluso si el usuario habla de forma coloquial, relajada, con pausas o rectificaciones ("bueno, al final le eché dos latas en vez de una").
+   - Transcribe y resume fielmente en el campo "transcription" lo que el usuario dijo o explicó.
+
+2. DESGLOSE DETALLADO DE PLATOS CON MÚLTIPLES INGREDIENTES (Ensaladas, bowls, salteados, guisos, platos combinados):
+   - NO agrupes todo en un plato genérico (NUNCA hagas "Ensalada mixta 300 kcal").
+   - Identifica y desglosa CADA ingrediente individualmente: base de hojas verdes/lechuga/rúcula/espinacas, tomate, cebolla, pepino, maíz, atún, huevo cocido, pollo, queso (feta, fresco, curado), frutos secos (nueces, pipas), legumbres, fruta, etc.
+   - CONDIMENTOS Y ALIÑOS CRÍTICOS: NUNCA olvides incluir el aceite (ej. Aceite de oliva virgen extra / AOVE) si se menciona ("un chorrito", "una cucharada", "le puse aceite", etc.). El aceite tiene un impacto calórico determinante (~9 kcal/g; 1 cucharada o chorrito habitual = 10-15g = 90-135 kcal de grasa pura). Si menciona vinagre balsámico/crema o salsas, inclúyelos con sus calorías correspondientes.
+
+3. ESTIMACIÓN REALISTA DE RACIONES COLOQUIALES (si no se indican gramos exactos):
+   - 1 tomate mediano ≈ 130-150g, 1 tomate grande ≈ 180-200g
+   - 1/2 cebolla mediana ≈ 50-60g
+   - 1 huevo entero ≈ 55-60g
+   - 1 lata individual de atún (escurrido) ≈ 60-80g
+   - 1 cucharada sopera o chorrito de aceite ≈ 10-15g (90-135 kcal)
+   - 1 puñado de nueces / frutos secos ≈ 20-25g
+   - 1/2 aguacate ≈ 70-80g
+   - 1/2 lata de maíz dulce ≈ 70g
+   - 1 ración de lechuga / canónigos / brotes ≈ 60-80g
+   - 1 ración de queso feta o fresco ≈ 40-50g
+   - 1 manzana o pieza de fruta mediana ≈ 150-180g
+
+4. BASE DE DATOS PERSONAL DEL USUARIO:
+   - Si el usuario te proporciona una lista de "ALIMENTOS REGISTRADOS" en su base de datos y alguno coincide claramente (ej. "pechuga de pollo", "atún al natural", "aceite de oliva virgen extra", "huevo"), usa ese alimento, asigna su "matched_food_id" correspondiente y calcula las macros exactas proporcionales a los gramos consumidos.
+   - Si no está en su base de datos, estima con rigor nutricional: nombre claro en español, gramos de la porción y macros completas (kcal, protein, carbs, fat).
+
+5. COMIDA DEL DÍA:
+   - Deduce la comida más probable ("desayuno", "comida", "merienda", "cena", "otro") según el tipo de alimentos o el contexto.
+
+6. FORMATO DE RESPUESTA:
+   Devuelve SIEMPRE y ÚNICAMENTE un objeto JSON válido con esta estructura:
 {
   "meal": "desayuno|comida|merienda|cena|otro",
-  "summary": "Breve resumen en español de lo detectado",
+  "summary": "Resumen claro en español de lo consumido (ej. Ensalada completa con atún, huevo y nueces)",
+  "transcription": "Resumen textual o transcripción fiel de lo que el usuario explicó en su nota de voz o mensaje",
   "items": [
     {
       "name": "Nombre claro del alimento",
@@ -94,13 +156,14 @@ Reglas:
   "total_protein": 22.0,
   "total_carbs": 5.0,
   "total_fat": 11.0,
-  "notes": "Consejo o aclaración breve opcional"
+  "notes": "Consejo o aclaración breve opcional sobre las porciones o aliños"
 }
 """
 
 
 def parse_with_gemini(api_key, text="", audio_bytes=None, audio_mime="audio/webm",
-                      image_bytes=None, image_mime="image/jpeg", foods_catalog=None):
+                      image_bytes=None, image_mime="image/jpeg", foods_catalog=None,
+                      preferred_model=None):
     """Llama a la API de Gemini con texto, audio y/o imagen, y devuelve la estructura de alimentos."""
     if not api_key:
         raise GeminiError("No se ha configurado la clave de la API de Gemini.")
@@ -113,32 +176,36 @@ def parse_with_gemini(api_key, text="", audio_bytes=None, audio_mime="audio/webm
         catalog_lines = [
             f"- ID {f['id']}: {f['name']} ({f.get('brand') or ''}) -> 100g = {f['kcal']}kcal, P:{f['protein']}g, C:{f['carbs']}g, F:{f['fat']}g"
             + (f" [1 {f['unit_name']} = {f['unit_g']}g]" if f.get('unit_g') else "")
-            for f in foods_catalog[:60]  # límite razonable para prompt
+            for f in foods_catalog[:80]  # catálogo relevante para prompt
         ]
         catalog_text = "ALIMENTOS REGISTRADOS EN MI BASE DE DATOS:\n" + "\n".join(catalog_lines) + "\n\n"
 
     user_prompt = catalog_text
     if text:
-        user_prompt += f"LO QUE HE COMIDO:\n{text.strip()}\n"
+        user_prompt += f"LO QUE HE COMIDO O DETALLES:\n{text.strip()}\n"
     else:
-        user_prompt += "Analiza el contenido multimedia adjunto (audio o foto) e indica los alimentos y macros consumidos.\n"
+        user_prompt += "Analiza con detenimiento el contenido multimedia adjunto (audio de voz y/o foto) e indica todos los alimentos, cantidades y macros consumidos.\n"
 
     parts.append({"text": user_prompt})
 
-    # Imagen adjunta
+    # Normalizar y adjuntar imagen
     if image_bytes:
+        clean_img_mime = (image_mime or "image/jpeg").split(";")[0].strip().lower()
         parts.append({
             "inlineData": {
-                "mimeType": image_mime,
+                "mimeType": clean_img_mime,
                 "data": base64.b64encode(image_bytes).decode("ascii"),
             }
         })
 
-    # Audio adjunto
+    # Normalizar y adjuntar audio (compatible con Safari iOS, Chrome Android, WebM, MP4, AAC, WAV, OGG)
     if audio_bytes:
+        clean_audio_mime = (audio_mime or "audio/webm").split(";")[0].strip().lower()
+        if clean_audio_mime in ("audio/m4a", "audio/x-m4a"):
+            clean_audio_mime = "audio/mp4"
         parts.append({
             "inlineData": {
-                "mimeType": audio_mime,
+                "mimeType": clean_audio_mime,
                 "data": base64.b64encode(audio_bytes).decode("ascii"),
             }
         })
@@ -160,7 +227,8 @@ def parse_with_gemini(api_key, text="", audio_bytes=None, audio_mime="audio/webm
     }
 
     last_error = None
-    for model_name in MODELS:
+    models_to_try = get_models_list(preferred_model)
+    for model_name in models_to_try:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={urllib.parse.quote(api_key)}"
         req = urllib.request.Request(
             url,
@@ -169,7 +237,8 @@ def parse_with_gemini(api_key, text="", audio_bytes=None, audio_mime="audio/webm
             method="POST"
         )
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            # Timeout ampliado a 90 segundos para permitir audios de hasta 2 minutos con inferencia completa
+            with urllib.request.urlopen(req, timeout=90) as resp:
                 data = json.load(resp)
                 candidates = data.get("candidates", [])
                 if not candidates:
@@ -191,8 +260,8 @@ def parse_with_gemini(api_key, text="", audio_bytes=None, audio_mime="audio/webm
             except Exception:
                 msg = e.reason
             last_error = f"Error en {model_name}: {msg}"
-            # Si es un error 404 (modelo no disponible), probamos con el siguiente modelo del fallback
-            if e.code == 404:
+            # Si es un error 404 (modelo no disponible) o 429 (rate limit), probamos con el siguiente modelo del fallback
+            if e.code in (404, 429):
                 continue
             raise GeminiError(last_error)
         except Exception as e:
@@ -200,4 +269,5 @@ def parse_with_gemini(api_key, text="", audio_bytes=None, audio_mime="audio/webm
             continue
 
     raise GeminiError(last_error or "No se pudo conectar con Gemini.")
+
 

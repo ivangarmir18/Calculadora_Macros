@@ -132,7 +132,9 @@ class ApiTest(unittest.TestCase):
         self.assertTrue(r.get_json()["pin_set"])
         other = A.app.test_client()  # otro dispositivo sin cookie
         self.assertEqual(other.get("/api/foods").status_code, 401)
-        self.assertEqual(other.get("/").status_code, 200)  # la pantalla de login sí carga
+        resp = other.get("/")
+        self.assertEqual(resp.status_code, 200)  # la pantalla de login sí carga
+        resp.close()
         self.assertEqual(other.post("/api/auth/login", json={"pin": "0000"}).status_code, 401)
         self.assertEqual(other.post("/api/auth/login", json={"pin": "1234"}).status_code, 200)
         self.assertEqual(other.get("/api/foods").status_code, 200)
@@ -213,9 +215,11 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(gemini.mask_api_key("AIzaSyB1234567890XYZ"), "AIzaSy••••••••0XYZ")
         self.assertEqual(gemini.mask_api_key("short"), "••••rt")
 
-        # Estado inicial (sin clave)
+        # Estado inicial (sin clave, modelo por defecto gemini-3.8-flash)
         st = self.c.get("/api/ai/status").get_json()
         self.assertIn("configured", st)
+        self.assertEqual(st["model"], "gemini-3.8-flash")
+        self.assertIn("gemini-3.8-flash", st["available_models"])
 
         # Guardar clave por API
         r = self.c.post("/api/ai/key", json={"key": "AIzaSyTestKey123456"}).get_json()
@@ -226,6 +230,11 @@ class ApiTest(unittest.TestCase):
         st2 = self.c.get("/api/ai/status").get_json()
         self.assertTrue(st2["configured"])
         self.assertEqual(st2["source"], "db")
+
+        # Cambiar modelo por API
+        rm = self.c.post("/api/ai/model", json={"model": "gemini-3.8-flash"}).get_json()
+        self.assertTrue(rm["ok"])
+        self.assertEqual(rm["model"], "gemini-3.8-flash")
 
         # Eliminar clave
         r_del = self.c.post("/api/ai/key", json={"key": ""}).get_json()
@@ -279,6 +288,56 @@ class ApiTest(unittest.TestCase):
         custom_entry = next(e for e in d["entries"] if "Arroz" in e["name"])
         self.assertEqual(custom_entry["kcal"], 310.5)
         self.assertEqual(custom_entry["protein"], 6.2)
+
+    def test_gemini_parse_voice_audio(self):
+        """Simula una nota de voz explicando una ensalada con muchos ingredientes."""
+        import base64
+        from unittest.mock import patch
+
+        # Configurar clave simulada
+        self.c.post("/api/ai/key", json={"key": "AIzaSyFakeKeyForTest12345"})
+
+        fake_salad_response = {
+            "meal": "comida",
+            "summary": "Ensalada completa con atún, huevo, tomate y aliño",
+            "transcription": "Me he preparado una ensalada con canónigos, un tomate grande, una lata de atún, un huevo cocido, unas nueces y un chorro de aceite de oliva virgen extra.",
+            "items": [
+                {"name": "Canónigos y hojas verdes", "grams": 70, "kcal": 15.0, "protein": 1.5, "carbs": 1.0, "fat": 0.3, "matched_food_id": None},
+                {"name": "Tomate", "grams": 160, "kcal": 28.8, "protein": 1.4, "carbs": 6.2, "fat": 0.3, "matched_food_id": None},
+                {"name": "Atún al natural", "grams": 80, "kcal": 88.0, "protein": 20.0, "carbs": 0.0, "fat": 0.8, "matched_food_id": None},
+                {"name": "Huevo cocido", "grams": 60, "kcal": 93.0, "protein": 7.8, "carbs": 0.7, "fat": 6.5, "matched_food_id": None},
+                {"name": "Nueces", "grams": 20, "kcal": 130.8, "protein": 3.0, "carbs": 2.7, "fat": 13.0, "matched_food_id": None},
+                {"name": "Aceite de oliva virgen extra", "grams": 12, "kcal": 106.1, "protein": 0.0, "carbs": 0.0, "fat": 11.9, "matched_food_id": None},
+            ],
+            "total_kcal": 461.7,
+            "total_protein": 33.7,
+            "total_carbs": 10.6,
+            "total_fat": 32.8,
+            "notes": "Excelente distribución de macros. El aceite aporta la mayor parte de las grasas saludables."
+        }
+
+        fake_audio_bytes = b"OggS\x00\x02\x00\x00\x00\x00\x00\x00fake_opus_audio_data_stream"
+        audio_b64 = base64.b64encode(fake_audio_bytes).decode("ascii")
+
+        with patch("gemini.parse_with_gemini", return_value=fake_salad_response) as mock_gemini:
+            r = self.c.post("/api/ai/parse", json={
+                "audio_b64": audio_b64,
+                "audio_mime": "audio/webm;codecs=opus",
+                "text": ""
+            })
+            self.assertEqual(r.status_code, 200)
+            data = r.get_json()
+            self.assertEqual(data["meal"], "comida")
+            self.assertIn("transcription", data)
+            self.assertIn("canónigos", data["transcription"])
+            self.assertEqual(len(data["items"]), 6)
+            self.assertAlmostEqual(data["total_kcal"], 461.7, places=1)
+
+            # Verificar que mock_gemini fue llamado con los bytes y el mime
+            mock_gemini.assert_called_once()
+            args, kwargs = mock_gemini.call_args
+            self.assertEqual(kwargs["audio_bytes"], fake_audio_bytes)
+            self.assertEqual(kwargs["audio_mime"], "audio/webm;codecs=opus")
 
 
 if __name__ == "__main__":
