@@ -27,6 +27,7 @@ from flask import Flask, Response, abort, jsonify, make_response, request, send_
 import db
 import gemini
 import off
+import pdf_report
 from db import get_conn, init_db
 
 try:  # opcional: solo para el código QR de "conectar el móvil"
@@ -38,7 +39,7 @@ except ImportError:  # pragma: no cover
 BASE = Path(__file__).resolve().parent
 ALLOWED_EXT = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 MEALS = ["desayuno", "comida", "merienda", "cena", "otro"]
-PROFILE_KEYS = ("sex", "age", "height", "weight", "activity", "goal")
+PROFILE_KEYS = ("sex", "age", "height", "weight", "activity", "goal", "tdee", "lbm")
 EXPORT_TABLES = ["foods", "presets", "preset_items", "entries", "weights"]
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
@@ -160,7 +161,7 @@ def set_auth_cookie(resp, token):
     return resp
 
 
-OPEN_PATHS = ("/", "/manifest.webmanifest", "/sw.js")
+OPEN_PATHS = ("/", "/manifest.webmanifest", "/sw.js", "/report")
 
 
 @app.before_request
@@ -285,15 +286,38 @@ def add_entry():
 
 @app.post("/api/entries/preset")
 def add_preset_entries():
-    """Añade todos los ingredientes de un preset (con gramos ajustados) al día."""
+    """Añade los ingredientes de un preset al día: o bien desglosados (cada ingrediente por separado), o agrupados en 1 sola línea."""
     d = request.get_json(force=True)
     day = valid_date(d.get("date") or date.today().isoformat())
     meal = clean_meal(d.get("meal"))
+    grouped = bool(d.get("grouped"))
+    name = (d.get("name") or "Combo").strip()
+    items = d.get("items", [])
+
     with get_conn() as conn:
-        for it in d.get("items", []):
-            grams = num(it.get("grams"))
-            if grams > 0:
-                insert_food_entry(conn, day, meal, it["food_id"], grams)
+        if grouped:
+            t = {"kcal": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0}
+            total_grams = 0.0
+            for it in items:
+                g = num(it.get("grams"))
+                if g > 0:
+                    f = conn.execute("SELECT * FROM foods WHERE id=?", (it["food_id"],)).fetchone()
+                    if f:
+                        m = scale(f, g)
+                        for k in t:
+                            t[k] += m[k]
+                        total_grams += g
+            conn.execute(
+                "INSERT INTO entries(date,time,meal,kind,name,grams,kcal,protein,carbs,fat) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (day, datetime.now().strftime("%H:%M"), meal, "combo", name, total_grams or None,
+                 round(t["kcal"], 1), round(t["protein"], 1), round(t["carbs"], 1), round(t["fat"], 1)),
+            )
+        else:
+            for it in items:
+                grams = num(it.get("grams"))
+                if grams > 0:
+                    insert_food_entry(conn, day, meal, it["food_id"], grams)
     return jsonify(ok=True), 201
 
 
@@ -414,22 +438,28 @@ def food_payload(d):
     name = (d.get("name") or "").strip()
     if not name:
         abort(400, "El nombre es obligatorio")
+    category = (d.get("category") or "otros").strip()
     return (name, (d.get("brand") or "").strip(), num(d.get("kcal")), num(d.get("protein")),
             num(d.get("carbs")), num(d.get("fat")), num(d.get("unit_g"), None),
-            (d.get("unit_name") or "").strip(), re.sub(r"\D", "", str(d.get("barcode") or "")))
+            (d.get("unit_name") or "").strip(), re.sub(r"\D", "", str(d.get("barcode") or "")),
+            category)
 
 
-FOOD_COLS = "name,brand,kcal,protein,carbs,fat,unit_g,unit_name,barcode"
+FOOD_COLS = "name,brand,kcal,protein,carbs,fat,unit_g,unit_name,barcode,category"
 
 
 @app.get("/api/foods")
 def list_foods():
     q = (request.args.get("q") or "").strip()
-    sql = "SELECT f.*, (SELECT COUNT(*) FROM entries e WHERE e.food_id=f.id) uses FROM foods f "
+    cat = (request.args.get("category") or "").strip().lower()
+    sql = "SELECT f.*, (SELECT COUNT(*) FROM entries e WHERE e.food_id=f.id) uses FROM foods f WHERE 1=1 "
     params = []
     if q:
-        sql += "WHERE f.name LIKE ? OR f.brand LIKE ? "
-        params = [f"%{q}%", f"%{q}%"]
+        sql += "AND (f.name LIKE ? OR f.brand LIKE ?) "
+        params += [f"%{q}%", f"%{q}%"]
+    if cat and cat not in ("todos", "all", ""):
+        sql += "AND f.category=? "
+        params.append(cat)
     sql += "ORDER BY uses DESC, f.name COLLATE NOCASE"   # los más usados primero = más rápido
     with get_conn() as conn:
         return jsonify(rows(conn.execute(sql, params)))
@@ -446,7 +476,7 @@ def create_food():
             photo = save_photo_bytes(*img)
     with get_conn() as conn:
         cur = conn.execute(
-            f"INSERT INTO foods({FOOD_COLS},photo) VALUES (?,?,?,?,?,?,?,?,?,?)", (*payload, photo))
+            f"INSERT INTO foods({FOOD_COLS},photo) VALUES (?,?,?,?,?,?,?,?,?,?,?)", (*payload, photo))
         return jsonify(id=cur.lastrowid, photo=photo), 201
 
 
@@ -454,7 +484,7 @@ def create_food():
 def update_food(fid):
     with get_conn() as conn:
         conn.execute(
-            "UPDATE foods SET name=?,brand=?,kcal=?,protein=?,carbs=?,fat=?,unit_g=?,unit_name=?,barcode=? WHERE id=?",
+            "UPDATE foods SET name=?,brand=?,kcal=?,protein=?,carbs=?,fat=?,unit_g=?,unit_name=?,barcode=?,category=? WHERE id=?",
             (*food_payload(request.get_json(force=True)), fid))
     return jsonify(ok=True)
 
@@ -524,8 +554,14 @@ def off_barcode(code):
 
 
 # ------------------------------------------------------------------ presets
-def load_presets(conn):
-    presets = rows(conn.execute("SELECT * FROM presets ORDER BY name COLLATE NOCASE"))
+def load_presets(conn, category=None):
+    sql = "SELECT * FROM presets "
+    params = []
+    if category and category not in ("todos", "all", ""):
+        sql += "WHERE category=? "
+        params.append(category)
+    sql += "ORDER BY name COLLATE NOCASE"
+    presets = rows(conn.execute(sql, params))
     for p in presets:
         p["items"] = rows(conn.execute(
             "SELECT pi.food_id, pi.grams, f.name, f.brand, f.kcal, f.protein, f.carbs, f.fat, f.photo "
@@ -553,15 +589,18 @@ def preset_name(d):
 
 @app.get("/api/presets")
 def list_presets():
+    cat = (request.args.get("category") or "").strip()
     with get_conn() as conn:
-        return jsonify(load_presets(conn))
+        return jsonify(load_presets(conn, category=cat))
 
 
 @app.post("/api/presets")
 def create_preset():
     d = request.get_json(force=True)
+    cat = (d.get("category") or "combos").strip()
     with get_conn() as conn:
-        cur = conn.execute("INSERT INTO presets(name, meal) VALUES (?,?)", (preset_name(d), clean_meal(d.get("meal"))))
+        cur = conn.execute("INSERT INTO presets(name, meal, category) VALUES (?,?,?)",
+                           (preset_name(d), clean_meal(d.get("meal")), cat))
         save_preset_items(conn, cur.lastrowid, d.get("items", []))
         return jsonify(id=cur.lastrowid), 201
 
@@ -572,6 +611,7 @@ def preset_from_entries():
     d = request.get_json(force=True)
     ids = [int(i) for i in d.get("entry_ids", [])]
     name = preset_name(d)
+    cat = (d.get("category") or "combos").strip()
     with get_conn() as conn:
         items = []
         for i in ids:
@@ -580,7 +620,8 @@ def preset_from_entries():
                 items.append({"food_id": e["food_id"], "grams": e["grams"]})
         if not items:
             abort(400, "Solo se pueden guardar como preset entradas con alimento")
-        cur = conn.execute("INSERT INTO presets(name, meal) VALUES (?,?)", (name, clean_meal(d.get("meal"))))
+        cur = conn.execute("INSERT INTO presets(name, meal, category) VALUES (?,?,?)",
+                           (name, clean_meal(d.get("meal")), cat))
         save_preset_items(conn, cur.lastrowid, items)
         return jsonify(id=cur.lastrowid), 201
 
@@ -588,8 +629,10 @@ def preset_from_entries():
 @app.put("/api/presets/<int:pid>")
 def update_preset(pid):
     d = request.get_json(force=True)
+    cat = (d.get("category") or "combos").strip()
     with get_conn() as conn:
-        conn.execute("UPDATE presets SET name=?, meal=? WHERE id=?", (preset_name(d), clean_meal(d.get("meal")), pid))
+        conn.execute("UPDATE presets SET name=?, meal=?, category=? WHERE id=?",
+                     (preset_name(d), clean_meal(d.get("meal")), cat, pid))
         save_preset_items(conn, pid, d.get("items", []))
     return jsonify(ok=True)
 
@@ -815,6 +858,28 @@ def export_csv():
     resp = Response("\ufeff" + buf.getvalue(), mimetype="text/csv; charset=utf-8")
     resp.headers["Content-Disposition"] = f'attachment; filename="macros-{date.today().isoformat()}.csv"'
     return resp
+
+
+@app.get("/api/export/pdf")
+def export_pdf():
+    """Genera y descarga un informe nutricional completo en PDF con fpdf2."""
+    target_date = request.args.get("date") or date.today().isoformat()
+    valid_date(target_date)
+    try:
+        days = max(1, min(int(request.args.get("days", 7)), 365))
+    except ValueError:
+        days = 7
+    with get_conn() as conn:
+        pdf_bytes = pdf_report.generate_macro_pdf(conn, target_date=target_date, days_range=days)
+    resp = Response(pdf_bytes, mimetype="application/pdf")
+    resp.headers["Content-Disposition"] = f'attachment; filename="macros-informe-{target_date}.pdf"'
+    return resp
+
+
+@app.get("/report")
+def report_page():
+    """Página de informe imprimible con opción directa de guardar como PDF."""
+    return send_from_directory(app.static_folder, "report.html")
 
 
 @app.post("/api/import")

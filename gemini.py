@@ -200,3 +200,4 @@ def parse_with_gemini(api_key, text="", audio_bytes=None, audio_mime="audio/webm
             continue
 
     raise GeminiError(last_error or "No se pudo conectar con Gemini.")
+

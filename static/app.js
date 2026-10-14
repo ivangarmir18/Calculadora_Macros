@@ -14,8 +14,32 @@ const parseISO = (s) => { const [y, m, d] = s.split("-").map(Number); return new
 const shiftDay = (s, n) => { const d = parseISO(s); d.setDate(d.getDate() + n); return isoDate(d); };
 const guessMeal = () => { const h = new Date().getHours(); return h < 11 ? "desayuno" : h < 16 ? "comida" : h < 19 ? "merienda" : "cena"; };
 
+const CATEGORIES = [
+  ["todos", "Todos"],
+  ["desayuno", "Desayunos"],
+  ["lacteos", "Lácteos / Boles"],
+  ["carnes_pescados", "Carnes / Pescados"],
+  ["hidratos_panes", "Hidratos / Panes"],
+  ["combos", "Combos"],
+  ["otros", "Otros"]
+];
+
+const categoryChips = (sel, idPrefix = "catFilter") => `
+  <div class="cat-scroll" id="${idPrefix}">
+    ${CATEGORIES.map(([k, label]) => `<button type="button" class="cat-chip ${k === sel ? "on" : ""}" data-cat="${k}">${label}</button>`).join("")}
+  </div>
+`;
+
+// Caching local en localStorage para carga instantánea y persistencia offline
+function getLocalCache(key, fallback = null) {
+  try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; } catch { return fallback; }
+}
+function setLocalCache(key, val) {
+  try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
+}
+
 let lastToday = isoDate(new Date());
-const state = { tab: "today", date: lastToday, foodQuery: "", histDays: 7 };
+const state = { tab: "today", date: lastToday, foodQuery: "", histDays: 7, foodCat: "todos", presetCat: "todos" };
 
 // ---------------------------------------------------------------------- red
 async function api(method, url, body) {
@@ -24,10 +48,18 @@ async function api(method, url, body) {
   else if (body !== undefined) { opt.headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(body); }
   let res;
   try { res = await fetch(url, opt); }
-  catch { toast("Sin conexión con el servidor"); throw new Error("offline"); }
+  catch {
+    // Si estamos sin conexión, intentar devolver caché de localStorage para peticiones GET
+    if (method === "GET") {
+      const cached = getLocalCache("api_cache:" + url);
+      if (cached) return cached;
+    }
+    toast("Sin conexión con el servidor"); throw new Error("offline");
+  }
   const data = await res.json().catch(() => ({}));
   if (res.status === 401 && !url.startsWith("/api/auth/")) { closeSheet(); renderLogin(); throw new Error("auth"); }
   if (!res.ok) { toast(data.error || "Error"); throw new Error(data.error || res.statusText); }
+  if (method === "GET") setLocalCache("api_cache:" + url, data);
   return data;
 }
 
@@ -108,6 +140,7 @@ async function renderToday() {
       <button class="icon-btn" onclick="changeDay(-1)" aria-label="Día anterior">${icon("left", 22)}</button>
       <div class="date" onclick="pickDate()"><strong>${isToday ? "Hoy" : label}</strong><span class="muted">${isToday ? label : "Toca para cambiar de día"}</span></div>
       ${isToday ? "" : `<button class="chip on" onclick="state.date=isoDate(new Date());renderToday()">Hoy</button>`}
+      <a class="icon-btn" href="/report?date=${state.date}" target="_blank" title="Ver / Descargar informe PDF" aria-label="Informe PDF">${icon("download", 20)}</a>
       <button class="icon-btn" onclick="changeDay(1)" aria-label="Día siguiente">${icon("right", 22)}</button>
     </div>
     <div class="card">
@@ -117,6 +150,8 @@ async function renderToday() {
         <div class="stats">
           <div class="stat"><div class="lbl">${remaining < 0 ? "Te has pasado" : "Te quedan"}</div>
             <div class="val" style="color:${remaining < 0 ? "var(--danger)" : "var(--accent)"}">${r0(Math.abs(remaining))} kcal</div></div>
+          <div class="stat"><div class="lbl">Déficit vs TDEE (3350)</div>
+            <div class="val" style="color:var(--accent)">-${r0(3350 - t.kcal)} kcal</div></div>
           <div class="stat"><div class="lbl">Objetivo</div><div class="val">${r0(g.kcal)} kcal</div></div>
         </div>
       </div>
@@ -166,19 +201,36 @@ async function saveMealAsPreset(meal) {
   };
 }
 
-// --- añadir alimento (mis alimentos / online)
+// --- añadir alimento (mis alimentos / online) con categorías
 async function addFood() {
   const foods = await api("GET", "/api/foods");
   openSheet(`${sheetHead("Añadir alimento")}${mealChips(guessMeal())}
+    ${categoryChips(state.foodCat, "foodCatChips")}
     <div class="search"><span>${icon("search", 18)}</span><input id="q" placeholder="Buscar en mis alimentos…" autocomplete="off">
       <button class="icon-btn ghost scan" onclick="scanBarcode(selectedMeal())" title="Escanear código de barras">${icon("barcode", 22)}</button></div>
     <div id="foodList" style="margin-top:12px"></div>`);
   bindMealChips();
+
+  const bindCat = () => {
+    $$("#foodCatChips .cat-chip").forEach((b) => b.onclick = () => {
+      $$("#foodCatChips .cat-chip").forEach((x) => x.classList.remove("on"));
+      b.classList.add("on");
+      state.foodCat = b.dataset.cat;
+      draw();
+    });
+  };
+  bindCat();
+
   const draw = () => {
     const q = $("#q").value.trim().toLowerCase();
-    const list = foods.filter((f) => !q || (f.name + " " + f.brand).toLowerCase().includes(q));
+    const cat = state.foodCat;
+    const list = foods.filter((f) => {
+      const matchCat = !cat || cat === "todos" || (f.category || "otros") === cat;
+      const matchQ = !q || (f.name + " " + (f.brand || "")).toLowerCase().includes(q);
+      return matchCat && matchQ;
+    });
     $("#foodList").innerHTML = list.map((f) => foodRow(f)).join("") + (q.length > 1 ? `<button class="btn block" id="goOnline">${icon("globe", 18)} Buscar «${esc($("#q").value.trim())}» online</button>` : "")
-      || emptyBox("apple", "Aún no hay alimentos.");
+      || emptyBox("apple", "No hay alimentos en esta categoría.");
     $$("#foodList .item").forEach((el) => el.onclick = () => pickFood(foods.find((f) => f.id == el.dataset.id), selectedMeal()));
     $("#goOnline")?.addEventListener("click", () => onlineSearch($("#q").value.trim(), selectedMeal()));
   };
@@ -188,8 +240,10 @@ async function addFood() {
 function pickFood(f, meal) {
   const hasUnit = f.unit_g > 0;
   openSheet(`${sheetHead(f.name)}${mealChips(meal)}
-    <div class="grid2">${hasUnit ? `<div><label>${esc(f.unit_name || "Unidades")}</label><input id="units" inputmode="decimal" value="1"></div>` : ""}
-      <div><label>Gramos</label><input id="grams" inputmode="decimal" value="${hasUnit ? f.unit_g : 100}"></div></div>
+    <div class="grid2">
+      <div><label>Gramos directos</label><input id="grams" inputmode="decimal" value="${hasUnit ? f.unit_g : 100}"></div>
+      ${hasUnit ? `<div><label>${esc(f.unit_name || "Unidad")} (1 ud = ${r0(f.unit_g)}g)</label><input id="units" inputmode="decimal" value="1"></div>` : ""}
+    </div>
     <div class="preview"><div class="big" id="pk"></div><div id="pm"></div></div>
     <button class="btn primary block" id="ok">${icon("plus", 18)} Añadir</button>`);
   bindMealChips();
@@ -257,22 +311,50 @@ function scanBarcode(meal) {
   })();
 }
 
-// --- añadir preset
+// --- añadir preset con categorías
 async function addPreset() {
   const presets = await api("GET", "/api/presets");
-  openSheet(`${sheetHead("Añadir preset")}${presets.length ? presets.map((p) => `<div class="item" data-id="${p.id}">
-      <div class="thumb accent">${icon("zap", 22)}</div><div class="grow"><div class="title">${esc(p.name)}</div>${macroLine(p.totals)}</div>
-      <div class="kcal-tag">${r0(p.totals.kcal)}<small>kcal</small></div></div>`).join("") : emptyBox("zap", "Aún no tienes presets.<br>Créalos en la pestaña Presets.")}`);
-  $$("#sheet .item").forEach((el) => el.onclick = () => pickPreset(presets.find((p) => p.id == el.dataset.id)));
+  openSheet(`${sheetHead("Añadir preset / combo")}${mealChips(guessMeal())}
+    ${categoryChips(state.presetCat, "presetCatChips")}
+    <div id="presetList" style="margin-top:12px"></div>`);
+  bindMealChips();
+
+  const bindCat = () => {
+    $$("#presetCatChips .cat-chip").forEach((b) => b.onclick = () => {
+      $$("#presetCatChips .cat-chip").forEach((x) => x.classList.remove("on"));
+      b.classList.add("on");
+      state.presetCat = b.dataset.cat;
+      draw();
+    });
+  };
+  bindCat();
+
+  const draw = () => {
+    const cat = state.presetCat;
+    const list = presets.filter((p) => !cat || cat === "todos" || (p.category || "combos") === cat);
+    $("#presetList").innerHTML = list.length ? list.map((p) => `<div class="item" data-id="${p.id}">
+      <div class="thumb accent">${icon("zap", 22)}</div>
+      <div class="grow">
+        <div class="title">${esc(p.name)}</div>
+        <div class="muted" style="font-size:.78rem;white-space:normal">${p.items.map((i) => `${r0(i.grams)}g ${esc(i.name)}`).join(" · ")}</div>
+        ${macroLine(p.totals)}
+      </div>
+      <div class="kcal-tag">${r0(p.totals.kcal)}<small>kcal</small></div></div>`).join("")
+      : emptyBox("zap", "No hay presets en esta categoría.");
+    $$("#presetList .item").forEach((el) => el.onclick = () => pickPreset(presets.find((p) => p.id == el.dataset.id)));
+  };
+  draw();
 }
+
 function pickPreset(p) {
   openSheet(`${sheetHead(p.name)}${mealChips(p.meal || guessMeal())}
-    <label>Multiplicador de todo el preset</label><input id="mult" inputmode="decimal" value="1">
-    <label>Gramos por ingrediente (editables)</label>
+    <label>Multiplicador de todo el plato/combo</label><input id="mult" inputmode="decimal" value="1">
+    <label>Gramos por ingrediente (ajustables en tiempo real)</label>
     ${p.items.map((i, k) => `<div class="ing-name"><div class="title">${esc(i.name)}</div>
       <input data-k="${k}" data-base="${i.grams}" inputmode="decimal" value="${i.grams}"></div>`).join("")}
     <div class="preview"><div class="big" id="pk"></div><div id="pm"></div></div>
-    <button class="btn primary block" id="ok">${icon("plus", 18)} Añadir</button>`);
+    <button class="btn primary block" id="addComboGrouped">${icon("zap", 18)} Añadir en 1 línea agrupada</button>
+    <button class="btn block" style="margin-top:8px" id="addComboItems">${icon("list", 18)} Añadir alimentos desglosados</button>`);
   bindMealChips();
   const upd = () => {
     const tot = { kcal: 0, protein: 0, carbs: 0, fat: 0 };
@@ -281,10 +363,19 @@ function pickPreset(p) {
   };
   $("#mult").oninput = () => { const m = toNum($("#mult").value); $$("#sheet input[data-k]").forEach((i) => i.value = r1(i.dataset.base * m)); upd(); };
   $$("#sheet input[data-k]").forEach((i) => i.oninput = upd);
-  $("#ok").onclick = async () => {
-    const items = $$("#sheet input[data-k]").map((i) => ({ food_id: p.items[i.dataset.k].food_id, grams: toNum(i.value) }));
-    await api("POST", "/api/entries/preset", { date: state.date, meal: selectedMeal(), items });
-    closeSheet(); toast("Preset añadido", true); renderToday();
+
+  const getItems = () => $$("#sheet input[data-k]").map((i) => ({ food_id: p.items[i.dataset.k].food_id, grams: toNum(i.value) }));
+
+  $("#addComboGrouped").onclick = async () => {
+    const items = getItems();
+    await api("POST", "/api/entries/preset", { date: state.date, meal: selectedMeal(), name: p.name, grouped: true, items });
+    closeSheet(); toast("Combo añadido agrupado", true); renderToday();
+  };
+
+  $("#addComboItems").onclick = async () => {
+    const items = getItems();
+    await api("POST", "/api/entries/preset", { date: state.date, meal: selectedMeal(), name: p.name, grouped: false, items });
+    closeSheet(); toast("Alimentos añadidos por separado", true); renderToday();
   };
   upd();
 }
@@ -563,33 +654,136 @@ async function editEntry(id) {
   $("#del").onclick = async () => { await api("DELETE", `/api/entries/${id}`); closeSheet(); toast("Eliminado"); renderToday(); };
 }
 
-// ======================================================================= PRESETS
+// ======================================================================= PRESETS & COMBOS
 async function renderPresets() {
   const presets = await api("GET", "/api/presets");
-  $("#view").innerHTML = `<h1>Presets</h1>
-    <p class="muted" style="margin-bottom:12px">Combinaciones que repites (tu batido de siempre). Al añadirlas puedes cambiar cantidades.</p>
-    <button class="btn primary block" style="margin-bottom:14px" onclick="editPreset()">${icon("plus", 18)} Nuevo preset</button>
-    ${presets.map((p) => `<div class="card"><div class="row between"><div class="row grow"><div class="thumb accent">${icon("zap", 22)}</div><div class="grow"><div class="title" style="font-size:1.05rem">${esc(p.name)}</div>
-        <div class="muted" style="white-space:normal">${p.items.map((i) => `${esc(i.name)} ${r0(i.grams)} g`).join(" · ") || "sin ingredientes"}</div></div></div>
-        <div class="kcal-tag" style="font-size:1.1rem">${r0(p.totals.kcal)}<small>kcal</small></div></div>
-      <div class="row between" style="margin-top:12px">${macroLine(p.totals)}
-        <div class="row"><button class="btn small" onclick="editPreset(${p.id})">${icon("pencil", 14)} Editar</button>
-        <button class="btn small primary" onclick="addPresetToToday(${p.id})">${icon("plus", 14)} Añadir hoy</button></div></div></div>`).join("") || emptyBox("zap", "Sin presets todavía.")}`;
+  const cat = state.presetCat;
+
+  // Separar los combos predefinidos de otros presets
+  const combos = presets.filter((p) => (p.category || "combos") === "combos" || p.name.toLowerCase().startsWith("combo"));
+  const others = presets.filter((p) => !combos.includes(p));
+
+  const filteredCombos = cat === "todos" || cat === "combos" ? combos
+    : combos.filter(p => (p.meal || "").includes(cat) || p.name.toLowerCase().includes(cat));
+
+  const filteredOthers = cat === "todos" ? others
+    : others.filter(p => (p.category || "otros") === cat || (p.meal || "").includes(cat));
+
+  const comboCardHtml = (p) => `
+    <div class="combo-card">
+      <div class="row between">
+        <div class="grow">
+          <div class="row" style="gap:6px;margin-bottom:4px">
+            <span class="combo-badge">${icon("zap", 12)} Combo 1-Clic</span>
+            <span class="muted" style="font-size:.78rem;text-transform:capitalize">· ${esc(p.meal || "comida")}</span>
+          </div>
+          <div class="title" style="font-size:1.05rem;font-weight:700">${esc(p.name)}</div>
+        </div>
+        <div class="kcal-tag" style="font-size:1.15rem">${r0(p.totals.kcal)}<small>kcal</small></div>
+      </div>
+      <div class="combo-items-preview">
+        ${p.items.map((i) => `<b>${r0(i.grams)}g</b> ${esc(i.name)}`).join(" · ")}
+      </div>
+      <div class="row between" style="margin-top:10px">
+        <div>${macroLine(p.totals)}</div>
+        <div class="row" style="gap:6px">
+          <button class="btn small" onclick="customizeCombo(${p.id})">${icon("pencil", 14)} Desglosar</button>
+          <button class="btn small primary" onclick="quickAddCombo(${p.id})">${icon("zap", 14)} 1-Clic hoy</button>
+        </div>
+      </div>
+    </div>`;
+
+  const presetRowHtml = (p) => `
+    <div class="card">
+      <div class="row between">
+        <div class="row grow">
+          <div class="thumb accent">${icon("zap", 22)}</div>
+          <div class="grow">
+            <div class="title" style="font-size:1.05rem">${esc(p.name)}</div>
+            <div class="muted" style="white-space:normal">${p.items.map((i) => `${esc(i.name)} ${r0(i.grams)} g`).join(" · ") || "sin ingredientes"}</div>
+          </div>
+        </div>
+        <div class="kcal-tag" style="font-size:1.1rem">${r0(p.totals.kcal)}<small>kcal</small></div>
+      </div>
+      <div class="row between" style="margin-top:12px">
+        ${macroLine(p.totals)}
+        <div class="row" style="gap:6px">
+          <button class="btn small" onclick="editPreset(${p.id})">${icon("pencil", 14)} Editar</button>
+          <button class="btn small primary" onclick="addPresetToToday(${p.id})">${icon("plus", 14)} Añadir hoy</button>
+        </div>
+      </div>
+    </div>`;
+
+  $("#view").innerHTML = `
+    <h1>Platos Típicos & Presets</h1>
+    <p class="muted" style="margin-bottom:12px">Añade comidas compuestas habituales en 1 solo clic o desglosa sus ingredientes para ajustar los gramos.</p>
+    ${categoryChips(state.presetCat, "presetCatFilter")}
+    <button class="btn primary block" style="margin:10px 0 16px" onclick="editPreset()">${icon("plus", 18)} Crear nuevo preset</button>
+
+    <h2>${icon("zap", 15)} Platos Típicos (Combos Frecuentes)</h2>
+    <div id="combosList">
+      ${filteredCombos.map(comboCardHtml).join("") || emptyBox("zap", "No hay combos en esta categoría.")}
+    </div>
+
+    ${filteredOthers.length ? `<h2>${icon("bookmark", 15)} Mis Otros Presets Personalizados</h2>
+      <div id="customPresetsList">${filteredOthers.map(presetRowHtml).join("")}</div>` : ""}`;
+
+  $$("#presetCatFilter .cat-chip").forEach((b) => b.onclick = () => {
+    $$("#presetCatFilter .cat-chip").forEach((x) => x.classList.remove("on"));
+    b.classList.add("on");
+    state.presetCat = b.dataset.cat;
+    renderPresets();
+  });
 }
-async function addPresetToToday(id) { state.date = isoDate(new Date()); const p = (await api("GET", "/api/presets")).find((x) => x.id === id); pickPresetThen(p); }
-function pickPresetThen(p) { go("today"); setTimeout(() => pickPreset(p), 60); }
+
+async function quickAddCombo(id) {
+  const presets = await api("GET", "/api/presets");
+  const p = presets.find((x) => x.id === id);
+  if (!p) return;
+  const items = p.items.map((i) => ({ food_id: i.food_id, grams: i.grams }));
+  await api("POST", "/api/entries/preset", {
+    date: state.date,
+    meal: p.meal || guessMeal(),
+    name: p.name,
+    grouped: true,
+    items,
+  });
+  toast(`«${p.name}» añadido a ${state.date} (${r0(p.totals.kcal)} kcal)`, true);
+  if (state.tab === "today") renderToday();
+}
+
+async function customizeCombo(id) {
+  const presets = await api("GET", "/api/presets");
+  const p = presets.find((x) => x.id === id);
+  if (p) pickPreset(p);
+}
+
+async function addPresetToToday(id) {
+  state.date = isoDate(new Date());
+  const p = (await api("GET", "/api/presets")).find((x) => x.id === id);
+  if (p) pickPreset(p);
+}
 
 async function editPreset(id) {
   const foods = await api("GET", "/api/foods");
-  const p = id ? (await api("GET", "/api/presets")).find((x) => x.id === id) : { name: "", meal: "", items: [{ food_id: foods[0]?.id, grams: 100 }] };
+  const p = id ? (await api("GET", "/api/presets")).find((x) => x.id === id) : { name: "", meal: "", category: "combos", items: [{ food_id: foods[0]?.id, grams: 100 }] };
   const row = (it) => `<div class="preset-ing"><select>${foods.map((f) => `<option value="${f.id}" ${f.id == it.food_id ? "selected" : ""}>${esc(f.name)}${f.brand ? " – " + esc(f.brand) : ""}</option>`).join("")}</select>
     <input inputmode="decimal" value="${it.grams}" placeholder="g"><button type="button" class="icon-btn ghost" aria-label="Quitar">${icon("x", 18)}</button></div>`;
-  openSheet(`${sheetHead(id ? "Editar preset" : "Nuevo preset")}
-    <label>Nombre</label><input id="pn" value="${esc(p.name)}" placeholder="Batido de proteína">
-    <label>Comida habitual (opcional)</label>${mealChips(p.meal || "")}
-    <label>Ingredientes</label><div id="ings">${p.items.map(row).join("")}</div>
-    <button class="btn small" id="addIng">${icon("plus", 14)} Ingrediente</button>
-    <button class="btn primary block" style="margin-top:16px" id="ok">${icon("check", 18)} Guardar</button>
+  openSheet(`${sheetHead(id ? "Editar preset / combo" : "Nuevo preset / combo")}
+    <label>Nombre del plato o preset</label><input id="pn" value="${esc(p.name)}" placeholder="Batido Moca + Cereales">
+    <label>Comida habitual</label>${mealChips(p.meal || "")}
+    <label>Categoría</label>
+    <select id="p_category">
+      <option value="combos" ${p.category === "combos" ? "selected" : ""}>Combos / Platos Frecuentes</option>
+      <option value="desayuno" ${p.category === "desayuno" ? "selected" : ""}>Desayunos</option>
+      <option value="lacteos" ${p.category === "lacteos" ? "selected" : ""}>Lácteos / Boles</option>
+      <option value="carnes_pescados" ${p.category === "carnes_pescados" ? "selected" : ""}>Carnes / Pescados</option>
+      <option value="hidratos_panes" ${p.category === "hidratos_panes" ? "selected" : ""}>Hidratos / Panes</option>
+      <option value="otros" ${p.category === "otros" ? "selected" : ""}>Otros</option>
+    </select>
+    <label>Ingredientes y cantidades (g)</label><div id="ings">${p.items.map(row).join("")}</div>
+    <button class="btn small" id="addIng">${icon("plus", 14)} Añadir ingrediente</button>
+    <button class="btn primary block" style="margin-top:16px" id="ok">${icon("check", 18)} Guardar preset</button>
     ${id ? `<button class="btn danger block" style="margin-top:8px" id="del">${icon("trash", 17)} Eliminar preset</button>` : ""}`);
   bindMealChips();
   const bindRemove = () => $$("#ings .preset-ing button").forEach((b) => b.onclick = () => b.parentElement.remove());
@@ -597,7 +791,7 @@ async function editPreset(id) {
   $("#addIng").onclick = () => { $("#ings").insertAdjacentHTML("beforeend", row({ food_id: foods[0]?.id, grams: 100 })); bindRemove(); };
   $("#ok").onclick = async () => {
     const items = $$("#ings .preset-ing").map((r) => ({ food_id: +$("select", r).value, grams: toNum($("input", r).value) }));
-    const body = { name: $("#pn").value, meal: $("#mealChips .chip.on")?.dataset.meal || "", items };
+    const body = { name: $("#pn").value, meal: $("#mealChips .chip.on")?.dataset.meal || "", category: $("#p_category").value, items };
     await (id ? api("PUT", `/api/presets/${id}`, body) : api("POST", "/api/presets", body));
     closeSheet(); renderPresets();
   };
@@ -606,17 +800,37 @@ async function editPreset(id) {
 
 // ===================================================================== ALIMENTOS
 async function renderFoods() {
-  $("#view").innerHTML = `<h1>Alimentos</h1>
-    <div class="grid2" style="margin-bottom:12px">
-      <button class="btn primary" onclick="editFood()">${icon("plus", 18)} Nuevo</button>
-      <button class="btn" onclick="onlineSearch('', null, true)">${icon("globe", 18)} Buscar online</button></div>
-    <div class="search"><span>${icon("search", 18)}</span><input id="fq" placeholder="Buscar…" value="${esc(state.foodQuery)}"></div><div id="fl" style="margin-top:12px"></div>`;
   const foods = await api("GET", "/api/foods");
+  setLocalCache("cached_foods", foods);
+
+  $("#view").innerHTML = `<h1>Alimentos Base</h1>
+    <div class="grid2" style="margin-bottom:12px">
+      <button class="btn primary" onclick="editFood()">${icon("plus", 18)} Nuevo alimento</button>
+      <button class="btn" onclick="onlineSearch('', null, true)">${icon("globe", 18)} Buscar online</button>
+    </div>
+    ${categoryChips(state.foodCat, "foodCatFilter")}
+    <div class="search"><span>${icon("search", 18)}</span><input id="fq" placeholder="Buscar en alimentos…" value="${esc(state.foodQuery)}"></div>
+    <div id="fl" style="margin-top:12px"></div>`;
+
   const draw = () => {
     const q = $("#fq").value.trim().toLowerCase(); state.foodQuery = $("#fq").value;
-    $("#fl").innerHTML = foods.filter((f) => !q || (f.name + " " + f.brand).toLowerCase().includes(q)).map((f) => foodRow(f)).join("") || emptyBox("search", "Nada por aquí.");
+    const cat = state.foodCat;
+    const list = foods.filter((f) => {
+      const matchCat = !cat || cat === "todos" || (f.category || "otros") === cat;
+      const matchQ = !q || (f.name + " " + (f.brand || "")).toLowerCase().includes(q);
+      return matchCat && matchQ;
+    });
+    $("#fl").innerHTML = list.map((f) => foodRow(f)).join("") || emptyBox("search", "No hay alimentos que coincidan.");
     $$("#fl .item").forEach((el) => el.onclick = () => editFood(+el.dataset.id, foods));
   };
+
+  $$("#foodCatFilter .cat-chip").forEach((b) => b.onclick = () => {
+    $$("#foodCatFilter .cat-chip").forEach((x) => x.classList.remove("on"));
+    b.classList.add("on");
+    state.foodCat = b.dataset.cat;
+    draw();
+  });
+
   $("#fq").oninput = draw; draw();
 }
 
@@ -633,21 +847,29 @@ async function shrinkImage(file, max = 800) {
 }
 
 function editFood(id, foods) {
-  const f = (foods || []).find((x) => x.id === id) || { name: "", brand: "", kcal: "", protein: "", carbs: "", fat: "", unit_g: "", unit_name: "", photo: "", barcode: "" };
+  const f = (foods || []).find((x) => x.id === id) || { name: "", brand: "", kcal: "", protein: "", carbs: "", fat: "", unit_g: "", unit_name: "", category: "otros", photo: "", barcode: "" };
   const num = (k, label) => `<div><label>${label}</label><input id="f_${k}" inputmode="decimal" value="${f[k] ?? ""}"></div>`;
   openSheet(`${sheetHead(id ? "Editar alimento" : "Nuevo alimento")}
     <div class="row" style="margin-bottom:4px">${thumb(f)}<div class="grow"><label style="margin-top:0">Foto</label><input id="f_photo" type="file" accept="image/*"></div></div>
     <label>Nombre</label><input id="f_name" value="${esc(f.name)}"><label>Marca (opcional)</label><input id="f_brand" value="${esc(f.brand)}">
+    <label>Categoría</label>
+    <select id="f_category">
+      <option value="desayuno" ${f.category === "desayuno" ? "selected" : ""}>Desayuno / Cereales</option>
+      <option value="lacteos" ${f.category === "lacteos" ? "selected" : ""}>Lácteos / Boles / Fruta</option>
+      <option value="carnes_pescados" ${f.category === "carnes_pescados" ? "selected" : ""}>Carnes / Pescados / Proteínas</option>
+      <option value="hidratos_panes" ${f.category === "hidratos_panes" ? "selected" : ""}>Hidratos / Panes</option>
+      <option value="otros" ${!f.category || f.category === "otros" ? "selected" : ""}>Otros</option>
+    </select>
     <h2>Por cada 100 g / ml</h2>
     <div class="grid2">${num("kcal", "Kcal")}${num("protein", "Proteína (g)")}${num("carbs", "Hidratos (g)")}${num("fat", "Grasa (g)")}</div>
     <h2>Unidad (opcional)</h2>
-    <div class="grid2"><div><label>Nombre (huevo, scoop…)</label><input id="f_unit_name" value="${esc(f.unit_name)}"></div>${num("unit_g", "Gramos por unidad")}</div>
+    <div class="grid2"><div><label>Nombre (cacito, huevo, envase…)</label><input id="f_unit_name" value="${esc(f.unit_name)}"></div>${num("unit_g", "Gramos por unidad")}</div>
     <label>Código de barras (opcional)</label><input id="f_barcode" inputmode="numeric" value="${esc(f.barcode || "")}">
-    <button class="btn primary block" style="margin-top:16px" id="ok">${icon("check", 18)} Guardar</button>
+    <button class="btn primary block" style="margin-top:16px" id="ok">${icon("check", 18)} Guardar alimento</button>
     ${id ? `<button class="btn danger block" style="margin-top:8px" id="del">${icon("trash", 17)} Eliminar</button>` : ""}`);
   $("#ok").onclick = async () => {
     const body = {};
-    ["name", "brand", "kcal", "protein", "carbs", "fat", "unit_g", "unit_name", "barcode"].forEach((k) => body[k] = $("#f_" + k).value);
+    ["name", "brand", "kcal", "protein", "carbs", "fat", "unit_g", "unit_name", "barcode", "category"].forEach((k) => body[k] = $("#f_" + k).value);
     const res = await (id ? api("PUT", `/api/foods/${id}`, body) : api("POST", "/api/foods", body));
     const file = $("#f_photo").files[0];
     if (file) { const fd = new FormData(); fd.append("photo", await shrinkImage(file)); await api("POST", `/api/foods/${id || res.id}/photo`, fd); }
@@ -659,8 +881,11 @@ function editFood(id, foods) {
 // ===================================================================== PROGRESO
 async function renderProgress() {
   const n = state.histDays;
-  const [h, weights] = await Promise.all([api("GET", `/api/history?days=${n}`), api("GET", "/api/weights")]);
-  const g = h.goals, a = h.average;
+  const [h, weights, s] = await Promise.all([api("GET", `/api/history?days=${n}`), api("GET", "/api/weights"), api("GET", "/api/settings")]);
+  const g = h.goals, a = h.average, p = s.profile || {};
+  const tdee = toNum(p.tdee || 3350);
+  const lbm = toNum(p.lbm || 85.5);
+  const weight = toNum(p.weight || 119);
   const byDate = Object.fromEntries(h.days.map((d) => [d.date, d]));
   const series = []; for (let i = n - 1; i >= 0; i--) { const dt = shiftDay(isoDate(new Date()), -i); series.push({ date: dt, kcal: byDate[dt]?.kcal || 0 }); }
   const wFrom = shiftDay(isoDate(new Date()), -Math.max(n, 30));
@@ -670,7 +895,31 @@ async function renderProgress() {
   const kc = a.protein * 4 + a.carbs * 4 + a.fat * 9;
   const share = (v) => kc ? Math.round(v / kc * 100) : 0;
 
-  $("#view").innerHTML = `<h1>Progreso</h1>
+  $("#view").innerHTML = `<h1>Progreso & Déficit</h1>
+    <div class="bio-card">
+      <div class="row between">
+        <strong>${icon("target", 16)} Objetivos & Parámetros Biométricos</strong>
+        <span class="combo-badge" style="background:var(--accent);color:var(--accent-ink)">Déficit -${r0(tdee - g.kcal)} kcal/día</span>
+      </div>
+      <div class="bio-grid">
+        <div class="bio-item"><div class="lbl">Gasto Diario (TDEE)</div><div class="val">${r0(tdee)} kcal</div></div>
+        <div class="bio-item"><div class="lbl">Objetivo Diario</div><div class="val" style="color:var(--accent)">${r0(g.kcal)} kcal</div></div>
+        <div class="bio-item"><div class="lbl">Peso / Masa Magra</div><div class="val">${weight} kg <small class="muted">/ ${lbm} kg</small></div></div>
+        <div class="bio-item"><div class="lbl">Proteína por kg LBM</div><div class="val" style="color:var(--p)">${(g.protein / (lbm || 1)).toFixed(2)} g/kg</div></div>
+      </div>
+    </div>
+
+    <div class="card" style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
+      <div>
+        <strong style="font-size:1rem">Informe Nutricional PDF</strong>
+        <div class="muted">Descarga o imprime un reporte completo con métricas y comidas</div>
+      </div>
+      <div class="row" style="gap:8px">
+        <a class="btn primary small" href="/report?date=${state.date}&days=${n}" target="_blank">${icon("download", 16)} Ver / Imprimir</a>
+        <a class="btn small" href="/api/export/pdf?date=${state.date}&days=${n}" download>${icon("download", 16)} Descargar .pdf</a>
+      </div>
+    </div>
+
     <div class="seg" style="margin-bottom:14px">${[7, 30, 90].map((d) => `<button class="${d === n ? "on" : ""}" onclick="state.histDays=${d};renderProgress()">${d} días</button>`).join("")}</div>
     <div class="card">
       <div class="muted">Promedio diario · ${h.logged_days} día(s) con registros</div>
@@ -747,11 +996,22 @@ async function renderSettings() {
       </div>
     </div>
 
-    <h2>${icon("target", 15)} Mis objetivos diarios</h2>
-    <div class="card"><div class="grid2">
-      <div><label style="margin-top:0">Kcal</label><input id="g_kcal" inputmode="decimal" value="${g.kcal}"></div><div><label style="margin-top:0">Proteína (g)</label><input id="g_protein" inputmode="decimal" value="${g.protein}"></div>
-      <div><label>Hidratos (g)</label><input id="g_carbs" inputmode="decimal" value="${g.carbs}"></div><div><label>Grasa (g)</label><input id="g_fat" inputmode="decimal" value="${g.fat}"></div></div>
-      <button class="btn primary block" style="margin-top:14px" id="saveGoals">${icon("check", 18)} Guardar objetivos</button></div>
+    <h2>${icon("target", 15)} Mis objetivos diarios & Biometría</h2>
+    <div class="card">
+      <div class="grid2">
+        <div><label style="margin-top:0">Kcal Objetivo</label><input id="g_kcal" inputmode="decimal" value="${g.kcal}"></div>
+        <div><label style="margin-top:0">Proteína (g)</label><input id="g_protein" inputmode="decimal" value="${g.protein}"></div>
+        <div><label>Hidratos (g)</label><input id="g_carbs" inputmode="decimal" value="${g.carbs}"></div>
+        <div><label>Grasa (g)</label><input id="g_fat" inputmode="decimal" value="${g.fat}"></div>
+      </div>
+      <h2 style="margin:16px 0 6px">${icon("gauge", 14)} Datos Biométricos</h2>
+      <div class="grid3">
+        <div><label style="margin-top:0">Gasto TDEE (kcal)</label><input id="p_tdee" inputmode="decimal" value="${p.tdee || 3350}"></div>
+        <div><label style="margin-top:0">Peso actual (kg)</label><input id="p_weight" inputmode="decimal" value="${p.weight || lastW || 119}"></div>
+        <div><label style="margin-top:0">Masa Magra LBM (kg)</label><input id="p_lbm" inputmode="decimal" value="${p.lbm || 85.5}"></div>
+      </div>
+      <button class="btn primary block" style="margin-top:14px" id="saveGoals">${icon("check", 18)} Guardar objetivos y perfil</button>
+    </div>
 
     <h2>${icon("calc", 15)} Calculadora de macros</h2>
     <div class="card"><p class="muted" style="margin-top:0">Calcula tus calorías con la fórmula Mifflin-St Jeor y reparte macros. Es una estimación: ajústala según tu progreso.</p>
@@ -784,8 +1044,12 @@ async function renderSettings() {
       <div class="grid2" style="margin-top:12px"><button class="btn primary" id="pinSave">${icon("lock", 17)} ${auth.pin_set ? "Cambiar" : "Activar"}</button>
       ${auth.pin_set ? `<button class="btn danger" id="pinOff">Quitar PIN</button>` : ""}</div></div>
 
-    <h2>${icon("download", 15)} Copia de seguridad</h2>
-    <div class="card"><p class="muted" style="margin-top:0">La copia incluye alimentos, presets, historial, peso, objetivos y fotos. Úsala para mover tus datos a otro PC.</p>
+    <h2>${icon("download", 15)} Copia de seguridad & Exportar</h2>
+    <div class="card"><p class="muted" style="margin-top:0">Exporta tu informe nutricional en PDF, descarga tus copias en JSON o historial en CSV para Excel.</p>
+      <div class="grid2" style="margin-bottom:8px">
+        <a class="btn primary" href="/report?date=${state.date}" target="_blank">${icon("download", 17)} Ver Informe PDF</a>
+        <a class="btn" href="/api/export/pdf?date=${state.date}" download>${icon("download", 17)} Descargar PDF</a>
+      </div>
       <div class="grid2"><a class="btn" href="/api/export" download>${icon("download", 17)} Copia (.json)</a><a class="btn" href="/api/export.csv" download>${icon("download", 17)} Historial (.csv)</a></div>
       <button class="btn block" style="margin-top:8px" id="restore">${icon("upload", 17)} Restaurar copia…</button><input id="restoreFile" type="file" accept=".json,application/json" class="hidden"></div>
 
@@ -794,8 +1058,15 @@ async function renderSettings() {
   $$("#themeSeg button").forEach((b) => b.onclick = () => setTheme(b.dataset.t));
   $$("#c_sex button").forEach((b) => b.onclick = () => { $$("#c_sex button").forEach((x) => x.classList.remove("on")); b.classList.add("on"); });
   $("#saveGoals").onclick = async () => {
-    await api("PUT", "/api/settings", { goals: Object.fromEntries(["kcal", "protein", "carbs", "fat"].map((k) => [k, toNum($("#g_" + k).value)])) });
-    toast("Objetivos guardados", true);
+    const goals = Object.fromEntries(["kcal", "protein", "carbs", "fat"].map((k) => [k, toNum($("#g_" + k).value)]));
+    const profile = {
+      ...(p || {}),
+      tdee: toNum($("#p_tdee")?.value || 3350),
+      weight: toNum($("#p_weight")?.value || 119),
+      lbm: toNum($("#p_lbm")?.value || 85.5),
+    };
+    await api("PUT", "/api/settings", { goals, profile });
+    toast("Objetivos y perfil biométrico guardados", true);
   };
   $("#saveAiKey").onclick = async () => {
     const k = $("#gemini_key").value.trim();

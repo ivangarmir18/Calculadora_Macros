@@ -34,8 +34,8 @@ class ApiTest(unittest.TestCase):
                 conn.execute(f"DELETE FROM {t}")
             conn.execute("DELETE FROM settings WHERE key IN ('pin_hash','auth_token')")
         self.foods = {f["name"]: f for f in self.c.get("/api/foods").get_json()}
-        self.milk = self.foods["Leche desnatada"]
-        self.whey = self.foods["Proteína whey (polvo)"]
+        self.milk = self.foods.get("Leche desnatada") or self.foods["Leche Desnatada / Sin Lactosa Light"]
+        self.whey = self.foods.get("Proteína whey (polvo)") or self.foods["Proteína Whey Chocolate"]
 
     def add(self, grams=200, meal="desayuno", food=None, day=DAY):
         r = self.c.post("/api/entries", json={"date": day, "meal": meal, "food_id": (food or self.milk)["id"], "grams": grams})
@@ -167,7 +167,14 @@ class ApiTest(unittest.TestCase):
     def test_csv_export(self):
         self.add(100)
         r = self.c.get("/api/export.csv")
-        self.assertIn("Leche desnatada", r.data.decode("utf-8-sig"))
+        self.assertIn(self.milk["name"], r.data.decode("utf-8-sig"))
+
+    def test_pdf_export(self):
+        self.add(100)
+        r = self.c.get(f"/api/export/pdf?date={DAY}&range=7")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.mimetype, "application/pdf")
+        self.assertTrue(r.data.startswith(b"%PDF"))
 
     # --- móvil / QR / OFF
     def test_connect_info(self):
