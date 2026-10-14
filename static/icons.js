@@ -48,6 +48,7 @@ const ICONS = {
   square: '<rect width="16" height="16" x="4" y="4" rx="2"/>',
   play: '<polygon points="6 3 20 12 6 21 6 3"/>',
   audioLines: '<path d="M2 10v3"/><path d="M6 6v11"/><path d="M10 3v18"/><path d="M14 8v7"/><path d="M18 5v13"/><path d="M22 10v3"/>',
+  eye: '<path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/>',
 };
 
 function icon(name, size = 20, cls = "") {

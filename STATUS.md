@@ -24,6 +24,7 @@ Leyenda: ✅ hecho y probado con tests · 🟡 opcional / mejora futura
 | **Copia de seguridad y exportación** | ✅ | Descarga de copia completa en JSON (con fotos) y exportación a CSV para Excel. Restauración segura contra path traversal. |
 | **Seguridad con PIN opcional** | ✅ | Bloqueo con PIN de 4+ dígitos protegido con hash PBKDF2 y token seguro con cookie HttpOnly. |
 | **Lanzadores portables** | ✅ | `start.bat` para Windows (doble clic) y `start.sh` para macOS/Linux con entorno virtual automático. |
+| **Exportación PDF del proceso (30 días)** | ✅ | Reporte profesional en PDF con gráfica de barritas de calorías día por día, déficits acumulados vs TDEE, adherencia, pérdida de grasa estimada, macros y tabla detallada. Selector de periodo (7, 30, 90 días). |
 | **CI y Tests automatizados** | ✅ | 23 tests automatizados que cubren todo el backend, validaciones, seguridad, Gemini con notas de voz y exportación. GitHub Actions configurado en Windows, Mac y Ubuntu. |
 
 ---
@@ -31,4 +32,4 @@ Leyenda: ✅ hecho y probado con tests · 🟡 opcional / mejora futura
 ## Mejoras futuras sugeridas
 
 - [ ] Soporte para modelos locales con Ollama en caso de querer usar IA sin conexión a internet.
-- [ ] Exportación de gráficos en formato PDF o imagen.
+

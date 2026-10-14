@@ -898,13 +898,13 @@ def export_pdf():
     target_date = request.args.get("date") or date.today().isoformat()
     valid_date(target_date)
     try:
-        days = max(1, min(int(request.args.get("days", 7)), 365))
+        days = max(1, min(int(request.args.get("days", 30)), 365))
     except ValueError:
-        days = 7
+        days = 30
     with get_conn() as conn:
         pdf_bytes = pdf_report.generate_macro_pdf(conn, target_date=target_date, days_range=days)
     resp = Response(pdf_bytes, mimetype="application/pdf")
-    resp.headers["Content-Disposition"] = f'attachment; filename="macros-informe-{target_date}.pdf"'
+    resp.headers["Content-Disposition"] = f'attachment; filename="informe_proceso_{days}dias_{target_date}.pdf"'
     return resp
 
 

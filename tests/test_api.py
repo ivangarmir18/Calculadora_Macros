@@ -173,10 +173,16 @@ class ApiTest(unittest.TestCase):
 
     def test_pdf_export(self):
         self.add(100)
-        r = self.c.get(f"/api/export/pdf?date={DAY}&range=7")
-        self.assertEqual(r.status_code, 200)
-        self.assertEqual(r.mimetype, "application/pdf")
-        self.assertTrue(r.data.startswith(b"%PDF"))
+        r7 = self.c.get(f"/api/export/pdf?date={DAY}&days=7")
+        self.assertEqual(r7.status_code, 200)
+        self.assertEqual(r7.mimetype, "application/pdf")
+        self.assertTrue(r7.data.startswith(b"%PDF"))
+
+        r30 = self.c.get(f"/api/export/pdf?date={DAY}&days=30")
+        self.assertEqual(r30.status_code, 200)
+        self.assertEqual(r30.mimetype, "application/pdf")
+        self.assertTrue(r30.data.startswith(b"%PDF"))
+        self.assertIn("informe_proceso_30dias", r30.headers.get("Content-Disposition", ""))
 
     # --- móvil / QR / OFF
     def test_connect_info(self):

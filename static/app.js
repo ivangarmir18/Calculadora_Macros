@@ -1119,14 +1119,24 @@ async function renderProgress() {
       </div>
     </div>
 
-    <div class="card" style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
-      <div>
-        <strong style="font-size:1rem">Informe Nutricional PDF</strong>
-        <div class="muted">Descarga o imprime un reporte completo con métricas y comidas</div>
-      </div>
-      <div class="row" style="gap:8px">
-        <a class="btn primary small" href="/report?date=${state.date}&days=${n}" target="_blank">${icon("download", 16)} Ver / Imprimir</a>
-        <a class="btn small" href="/api/export/pdf?date=${state.date}&days=${n}" download>${icon("download", 16)} Descargar .pdf</a>
+    <div class="card" style="border-color:color-mix(in srgb, var(--accent) 35%, var(--line));background:color-mix(in srgb, var(--accent) 5%, var(--card))">
+      <div class="row between" style="gap:12px;flex-wrap:wrap">
+        <div>
+          <div class="row" style="gap:6px;margin-bottom:2px">
+            <span class="combo-badge" style="background:var(--accent);color:var(--accent-ink)">${icon("chart", 12)} Informe PDF del Proceso</span>
+            <span class="muted" style="font-size:.78rem">· Periodo de ${n} días</span>
+          </div>
+          <strong style="font-size:1.05rem;display:block;margin:2px 0">Descargar resumen detallado en PDF</strong>
+          <div class="muted" style="font-size:.84rem">Incluye gráfica de barritas de calorías día por día, déficit acumulado, macros y tabla completa.</div>
+        </div>
+        <div class="row" style="gap:8px">
+          <a class="btn primary" href="/api/export/pdf?date=${state.date}&days=${n}" download style="padding:10px 14px;font-size:.9rem">
+            ${icon("download", 16)} Descargar PDF (${n} días)
+          </a>
+          <a class="btn" href="/report?date=${state.date}&days=${n}" target="_blank" title="Ver en navegador" style="padding:10px 12px">
+            ${icon("eye", 16)}
+          </a>
+        </div>
       </div>
     </div>
 
