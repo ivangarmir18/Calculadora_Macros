@@ -148,8 +148,22 @@ async function renderToday() {
         <div class="ring-wrap">${ringChart(t.kcal, g.kcal)}
           <div class="center"><div class="big">${r0(t.kcal)}</div><div class="muted">kcal</div></div></div>
         <div class="stats">
-          <div class="stat"><div class="lbl">${remaining < 0 ? "Te has pasado" : "Te quedan"}</div>
-            <div class="val" style="color:${remaining < 0 ? "var(--danger)" : "var(--accent)"}">${r0(Math.abs(remaining))} kcal</div></div>
+          <div class="stat">
+            <div class="lbl">${
+              remaining >= 0
+                ? "Te quedan"
+                : t.kcal <= g.kcal * 1.10
+                ? "En rango (±10%)"
+                : "Te has pasado"
+            }</div>
+            <div class="val" style="color:${
+              remaining >= 0
+                ? "var(--accent)"
+                : t.kcal <= g.kcal * 1.10
+                ? "var(--accent)"
+                : "var(--danger)"
+            }">${remaining < 0 && t.kcal <= g.kcal * 1.10 ? "+" : ""}${r0(Math.abs(remaining))} kcal</div>
+          </div>
           <div class="stat"><div class="lbl">Déficit vs TDEE (3350)</div>
             <div class="val" style="color:var(--accent)">-${r0(3350 - t.kcal)} kcal</div></div>
           <div class="stat"><div class="lbl">Objetivo</div><div class="val">${r0(g.kcal)} kcal</div></div>
@@ -756,9 +770,14 @@ function openAiSheet() {
         <div class="row between">
           <div class="grow">
             <input class="ai-name" value="${esc(it.name)}" style="font-weight:700;padding:6px 8px;margin-bottom:4px">
-            <span class="ai-badge ${it.matched_food_id ? 'matched' : 'estimated'}">
-              ${it.matched_food_id ? '✓ Coincide con tu base' : '★ Estimación IA'}
-            </span>
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+              <span class="ai-badge ${it.matched_food_id ? 'matched' : 'estimated'}">
+                ${it.matched_food_id ? '✓ Coincide con tu base' : '★ Estimación IA'}
+              </span>
+              <button type="button" class="btn ghost small ai-save-food" style="padding:2px 8px;font-size:.76rem;border:1px dashed var(--line);border-radius:6px;gap:4px" title="Guardar a 'Mis Alimentos' calculado por cada 100g">
+                ${icon("bookmark", 13)} Guardar (100g)
+              </button>
+            </div>
           </div>
           <button type="button" class="icon-btn ghost ai-del" title="Eliminar ítem">${icon("trash", 16)}</button>
         </div>
@@ -797,6 +816,55 @@ function openAiSheet() {
         <button class="btn primary block" style="margin-top:14px" id="aiApplyBtn">${icon("plus", 18)} Añadir alimentos a ${esc(state.date)}</button>
       </div>
     `;
+
+    // Guardar ítem a base de datos calculado por 100g
+    $$("#aiItemsList .ai-save-food").forEach(btn => {
+      btn.onclick = async () => {
+        const itemEl = btn.closest(".ai-item");
+        const idx = +itemEl.dataset.idx;
+        const name = itemEl.querySelector(".ai-name").value.trim();
+        const grams = toNum(itemEl.querySelector(".ai-grams").value) || 100;
+        const totalKcal = toNum(itemEl.querySelector(".ai-kcal").value);
+        const totalP = toNum(itemEl.querySelector(".ai-p").value);
+        const totalC = toNum(itemEl.querySelector(".ai-c").value);
+        const totalF = toNum(itemEl.querySelector(".ai-f").value);
+
+        if (!name) return toast("El alimento necesita un nombre");
+        btn.disabled = true;
+        btn.innerHTML = `${icon("sparkles", 13, "spin")} Guardando...`;
+
+        try {
+          const factor = grams > 0 ? 100 / grams : 1;
+          const payload = {
+            name,
+            brand: "Guardado desde IA",
+            kcal: Math.round(totalKcal * factor * 10) / 10,
+            protein: Math.round(totalP * factor * 10) / 10,
+            carbs: Math.round(totalC * factor * 10) / 10,
+            fat: Math.round(totalF * factor * 10) / 10,
+            category: "otros"
+          };
+
+          const saved = await api("POST", "/api/foods", payload);
+          if (data.items[idx]) {
+            data.items[idx].matched_food_id = saved.id;
+          }
+          itemEl.dataset.matchedFoodId = saved.id;
+
+          const badge = itemEl.querySelector(".ai-badge");
+          if (badge) {
+            badge.className = "ai-badge matched";
+            badge.textContent = "✓ Guardado en tu base";
+          }
+          btn.style.display = "none";
+          toast(`«${name}» guardado por 100g en tu base`, true);
+        } catch (err) {
+          btn.disabled = false;
+          btn.innerHTML = `${icon("bookmark", 13)} Guardar (100g)`;
+          toast("Error al guardar: " + err.message);
+        }
+      };
+    });
 
     // Borrar ítems
     $$("#aiItemsList .ai-del").forEach(btn => {

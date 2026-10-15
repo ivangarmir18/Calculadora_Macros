@@ -1,10 +1,11 @@
 /* Gráficas SVG sin librerías. Los colores vienen de variables CSS (valen para tema claro y oscuro). */
 
-/** Anillo de progreso. value/goal -> arco. */
+/** Anillo de progreso. value/goal -> arco con tolerancia del 10%. */
 function ringChart(value, goal, { size = 132, stroke = 12, color = "var(--kcal)" } = {}) {
   const r = (size - stroke) / 2, c = 2 * Math.PI * r;
   const pct = goal > 0 ? Math.min(value / goal, 1) : 0;
-  const over = goal > 0 && value > goal;
+  // Tolerancia del 10%: solo se considera "over" si se supera el 110% del objetivo
+  const over = goal > 0 && value > goal * 1.10;
   return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" class="ring">
     <circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="var(--track)" stroke-width="${stroke}"/>
     <circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="${over ? "var(--danger)" : color}" stroke-width="${stroke}"
@@ -26,7 +27,7 @@ function donutChart(p, c, f, size = 110) {
   return `<svg width="${size}" height="${size}" viewBox="0 0 100 100">${arcs}</svg>`;
 }
 
-/** Barras de kcal por día con línea de objetivo. days: [{date,kcal}] ascendente. */
+/** Barras de kcal por día con línea de objetivo y tolerancia (+10%). days: [{date,kcal}] ascendente. */
 function barChart(days, goal) {
   const W = 340, H = 150, padL = 4, padB = 18, padT = 8, n = days.length || 1;
   const max = Math.max(goal * 1.15, ...days.map((d) => d.kcal), 1);
@@ -34,7 +35,8 @@ function barChart(days, goal) {
   const y = (v) => padT + (H - padT - padB) * (1 - v / max);
   const bars = days.map((d, i) => {
     const h = Math.max(0, (H - padT - padB) * (d.kcal / max));
-    const cls = d.kcal > goal ? "over" : d.kcal > 0 ? "ok" : "";
+    // Tolerancia 10%: verde si <= objetivo * 1.10
+    const cls = d.kcal > goal * 1.10 ? "over" : d.kcal > 0 ? "ok" : "";
     return `<rect class="bar-r ${cls}" x="${padL + i * bw + gap / 2}" y="${H - padB - h}" width="${Math.max(1, bw - gap)}" height="${h}" rx="${Math.min(4, bw / 3)}"><title>${d.date}: ${Math.round(d.kcal)} kcal</title></rect>`;
   }).join("");
   const step = Math.ceil(n / 6);

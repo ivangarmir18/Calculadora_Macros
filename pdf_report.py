@@ -295,12 +295,12 @@ def generate_macro_pdf(conn, target_date=None, days_range=30):
         if k > 0:
             bh = max(1.5, (k / max_y) * inner_h)
             by = bottom_y - bh
-            # Color de barra: Verde si en objetivo o debajo, Rojo si superó objetivo
-            if k <= goal_kcal:
-                pdf.set_fill_color(16, 185, 129)  # Verde esmeralda
+            # Color de barra: Verde si en objetivo o en margen de tolerancia (+10%), Rojo si superó con exceso
+            if k <= goal_kcal * 1.10:
+                pdf.set_fill_color(16, 185, 129)  # Verde esmeralda (en rango / tolerancia)
                 pdf.set_draw_color(13, 148, 136)
             else:
-                pdf.set_fill_color(239, 68, 68)   # Rojo / exceso
+                pdf.set_fill_color(239, 68, 68)   # Rojo / exceso real (>10%)
                 pdf.set_draw_color(220, 38, 38)
             pdf.rect(bx, by, bar_w, bh, "DF")
         else:
@@ -325,29 +325,29 @@ def generate_macro_pdf(conn, target_date=None, days_range=30):
     leg_x = 14
     leg_y = pdf.get_y()
 
-    # Verde: en objetivo
+    # Verde: en objetivo (tolerancia 10%)
     pdf.set_fill_color(16, 185, 129)
     pdf.rect(leg_x, leg_y + 1, 3.5, 3.5, "F")
     pdf.set_xy(leg_x + 5, leg_y)
     pdf.set_text_color(51, 65, 85)
-    pdf.cell(38, 5, "En objetivo / Déficit")
+    pdf.cell(48, 5, "En objetivo (tolerancia 10%)")
 
-    # Rojo: superó
-    leg_x2 = leg_x + 44
+    # Rojo: exceso
+    leg_x2 = leg_x + 52
     pdf.set_fill_color(239, 68, 68)
     pdf.rect(leg_x2, leg_y + 1, 3.5, 3.5, "F")
     pdf.set_xy(leg_x2 + 5, leg_y)
-    pdf.cell(34, 5, "Superó objetivo")
+    pdf.cell(32, 5, "Exceso (>10%)")
 
     # Gris: sin registro
-    leg_x3 = leg_x2 + 40
+    leg_x3 = leg_x2 + 38
     pdf.set_fill_color(226, 232, 240)
     pdf.rect(leg_x3, leg_y + 1, 3.5, 3.5, "F")
     pdf.set_xy(leg_x3 + 5, leg_y)
-    pdf.cell(30, 5, "Sin registro")
+    pdf.cell(28, 5, "Sin registro")
 
     # Naranja: Línea objetivo
-    leg_x4 = leg_x3 + 36
+    leg_x4 = leg_x3 + 34
     pdf.set_draw_color(249, 115, 22)
     pdf.set_dash_pattern(dash=1.5, gap=1)
     pdf.line(leg_x4, leg_y + 2.5, leg_x4 + 6, leg_y + 2.5)
@@ -436,8 +436,8 @@ def generate_macro_pdf(conn, target_date=None, days_range=30):
             bar_fill_w = min(bar_track_w, (d["kcal"] / goal_kcal) * bar_track_w)
             pdf.set_fill_color(226, 232, 240)
             pdf.rect(cur_x + 2, cur_y + 1.2, bar_track_w, 2.8, "F")
-            # Color de progreso
-            if d["kcal"] <= goal_kcal:
+            # Color de progreso (tolerancia del 10%)
+            if d["kcal"] <= goal_kcal * 1.10:
                 pdf.set_fill_color(16, 185, 129)
             else:
                 pdf.set_fill_color(239, 68, 68)
