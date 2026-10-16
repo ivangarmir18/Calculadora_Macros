@@ -345,7 +345,20 @@ class ApiTest(unittest.TestCase):
             self.assertEqual(kwargs["audio_bytes"], fake_audio_bytes)
             self.assertEqual(kwargs["audio_mime"], "audio/webm;codecs=opus")
 
+    def test_github_sync_status_and_clean_db(self):
+        import github_sync
+        self.add(200)
+        self.c.post("/api/ai/key", json={"key": "AIzaSySecretKey9999"})
+        st = self.c.get("/api/github/status").get_json()
+        self.assertIn("repo", st)
+        self.assertEqual(st["repo"], "ivangarmir18/Calculadora_Macros")
+
+        clean_bytes = github_sync._create_clean_db_bytes()
+        self.assertTrue(clean_bytes.startswith(b"SQLite format 3"))
+        self.assertNotIn(b"AIzaSySecretKey9999", clean_bytes)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

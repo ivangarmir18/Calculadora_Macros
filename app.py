@@ -26,6 +26,7 @@ from flask import Flask, Response, abort, jsonify, make_response, request, send_
 
 import db
 import gemini
+import github_sync
 import off
 import pdf_report
 from db import get_conn, init_db
@@ -255,6 +256,7 @@ def too_big(e):
 @app.get("/api/day/<day>")
 def get_day(day):
     valid_date(day)
+    github_sync.maybe_periodic_pull()
     with get_conn() as conn:
         entries = rows(conn.execute("SELECT * FROM entries WHERE date=? ORDER BY time, id", (day,)))
         return jsonify(date=day, entries=entries, totals=totals(entries), goals=get_goals(conn))
@@ -813,6 +815,46 @@ def ai_apply():
 
     return jsonify(ok=True, added=added), 201
 
+
+# -------------------------------------------- sincronización con GitHub (Render / nube)
+@app.get("/api/github/status")
+def github_status():
+    return jsonify(github_sync.get_status())
+
+
+@app.post("/api/github/token")
+def save_github_token():
+    d = request.get_json(force=True) or {}
+    token = (d.get("token") or "").strip()
+    repo = (d.get("repo") or "").strip()
+    with get_conn() as conn:
+        if not token:
+            conn.execute("DELETE FROM settings WHERE key='github_token'")
+        else:
+            set_setting(conn, "github_token", token)
+        if repo:
+            set_setting(conn, "github_repo", repo)
+    if token:
+        threading.Thread(target=github_sync.push_to_github, daemon=True).start()
+    return jsonify(ok=True, **github_sync.get_status())
+
+
+@app.post("/api/github/sync")
+def manual_github_sync():
+    d = request.get_json(force=True) or {} if request.data else {}
+    mode = (d.get("mode") or "auto").strip()
+    if mode == "pull":
+        res = github_sync.pull_from_github(force=True)
+    elif mode == "push":
+        res = github_sync.push_to_github()
+    else:
+        # auto: si hay token, primero intenta subir cambios locales o bajar si el remoto es nuevo
+        cfg = github_sync.get_config()
+        if cfg["token"]:
+            res = github_sync.push_to_github()
+        else:
+            res = github_sync.pull_from_github(force=True)
+    return jsonify(**res, status=github_sync.get_status())
 
 
 # ------------------------------------------------------ conectar el móvil

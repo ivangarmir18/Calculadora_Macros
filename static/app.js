@@ -112,7 +112,31 @@ document.addEventListener("visibilitychange", () => {
 
 // ============================================================================ HOY
 async function renderToday() {
-  const d = await api("GET", `/api/day/${state.date}`);
+  let d = await api("GET", `/api/day/${state.date}`);
+  if (d.entries && d.entries.length > 0) {
+    setLocalCache("journal_day:" + state.date, d.entries);
+  } else {
+    const saved = getLocalCache("journal_day:" + state.date, []);
+    if (Array.isArray(saved) && saved.length > 0) {
+      try {
+        const byM = {};
+        saved.forEach((e) => (byM[e.meal || "otro"] ||= []).push({
+          name: e.name,
+          grams: e.grams,
+          kcal: e.kcal,
+          protein: e.protein,
+          carbs: e.carbs,
+          fat: e.fat,
+          matched_food_id: e.food_id || null,
+        }));
+        for (const [m, items] of Object.entries(byM)) {
+          await api("POST", "/api/ai/apply", { date: state.date, meal: m, items });
+        }
+        d = await api("GET", `/api/day/${state.date}`);
+        toast("Registros recuperados automáticamente", true);
+      } catch {}
+    }
+  }
   const isToday = state.date === isoDate(new Date());
   const label = parseISO(state.date).toLocaleDateString("es-ES", { weekday: "long", day: "numeric", month: "long" });
   const g = d.goals, t = d.totals, remaining = g.kcal - t.kcal;
@@ -929,7 +953,14 @@ async function editEntry(id) {
     await api("PUT", `/api/entries/${id}`, body); closeSheet(); renderToday();
   };
   $("#dup").onclick = async () => { await api("POST", `/api/entries/${id}/copy`, { date: isoDate(new Date()), meal: selectedMeal() }); closeSheet(); toast(isToday ? "Duplicado" : "Copiado a hoy", true); renderToday(); };
-  $("#del").onclick = async () => { await api("DELETE", `/api/entries/${id}`); closeSheet(); toast("Eliminado"); renderToday(); };
+  $("#del").onclick = async () => {
+    const cur = getLocalCache("journal_day:" + state.date, []);
+    setLocalCache("journal_day:" + state.date, cur.filter((x) => x.id !== id));
+    await api("DELETE", `/api/entries/${id}`);
+    closeSheet();
+    toast("Eliminado");
+    renderToday();
+  };
 }
 
 // ======================================================================= PRESETS & COMBOS
@@ -1249,7 +1280,14 @@ function setTheme(t) {
 }
 
 async function renderSettings() {
-  const [s, conn, auth, weights, ai] = await Promise.all([api("GET", "/api/settings"), api("GET", "/api/connect"), api("GET", "/api/auth/status"), api("GET", "/api/weights"), api("GET", "/api/ai/status")]);
+  const [s, conn, auth, weights, ai, gh] = await Promise.all([
+    api("GET", "/api/settings"),
+    api("GET", "/api/connect"),
+    api("GET", "/api/auth/status"),
+    api("GET", "/api/weights"),
+    api("GET", "/api/ai/status"),
+    api("GET", "/api/github/status").catch(() => ({ configured: false, repo: "ivangarmir18/Calculadora_Macros" })),
+  ]);
   const g = s.goals, p = s.profile, theme = localStorage.getItem("theme") || "dark";
   const lastW = weights[weights.length - 1]?.kg || "";
   const isLocalhost = ["localhost", "127.0.0.1"].includes(location.hostname);
@@ -1257,6 +1295,41 @@ async function renderSettings() {
 
     <h2>${icon("sun", 15)} Apariencia</h2>
     <div class="seg" id="themeSeg">${[["dark", "moon", "Oscuro"], ["light", "sun", "Claro"], ["auto", "sliders", "Auto"]].map(([t, ic, l]) => `<button data-t="${t}" class="${t === theme ? "on" : ""}">${icon(ic, 16)} ${l}</button>`).join("")}</div>
+
+    <h2>${icon("globe", 15)} Sincronización Automática con GitHub (Render / Nube)</h2>
+    <div class="card">
+      <div class="row between" style="margin-bottom:8px">
+        <span class="muted">Auto-guardado en <code>data/macros.db</code></span>
+        <span class="badge-status ${gh.configured ? "active" : "inactive"}">
+          ${gh.configured ? "● Activo (" + (gh.source === "env" ? "variable GITHUB_TOKEN" : "guardado en app") + ")" : "○ Falta Token de GitHub"}
+        </span>
+      </div>
+      <div class="muted" style="font-size:.82rem;margin-bottom:8px">
+        Repositorio: <b>${esc(gh.repo || "ivangarmir18/Calculadora_Macros")}</b> ${gh.sha ? `· SHA: <code>${esc(gh.sha)}</code>` : ""}
+        ${gh.last_push_at ? `<br>Última subida a GitHub: <b>${esc(gh.last_push_at.replace("T", " "))}</b>` : ""}
+        ${gh.last_pull_at ? `<br>Última descarga desde GitHub: <b>${esc(gh.last_pull_at.replace("T", " "))}</b>` : ""}
+      </div>
+      ${gh.last_error ? `<div class="note" style="margin-bottom:10px;border-color:var(--danger)">${icon("info", 18)}<div style="color:var(--danger)">${esc(gh.last_error)}</div></div>` : ""}
+      ${gh.configured ? `<div class="url" style="color:var(--muted)">Token: ${esc(gh.masked)}</div>` : ""}
+      <label>${gh.configured ? "Cambiar Personal Access Token de GitHub" : "Token de GitHub (GITHUB_TOKEN)"}</label>
+      <input id="gh_token" type="password" placeholder="Pega tu token ghp_... o github_pat_..." autocomplete="off">
+      <div class="grid2" style="margin-top:10px">
+        <button class="btn primary" id="saveGhToken">${icon("check", 17)} Guardar Token</button>
+        ${gh.source === "db" ? `<button class="btn danger" id="deleteGhToken">Quitar Token</button>` : `<button class="btn" id="syncGhNow">${icon("repeat", 17)} Sincronizar ahora</button>`}
+      </div>
+      <div class="grid2" style="margin-top:8px">
+        <button class="btn" id="pushGhNow">${icon("upload", 16)} Subir DB a GitHub</button>
+        <button class="btn" id="pullGhNow">${icon("download", 16)} Bajar DB de GitHub</button>
+      </div>
+      <div class="note" style="margin-top:12px">
+        ${icon("info", 18)}
+        <div>
+          <b>¿Cómo funciona en Render y en tu PC?</b><br>
+          Cada vez que apuntas una comida, pesaje o alimento, la app sube automáticamente <code>data/macros.db</code> a tu GitHub (con <code>[skip render]</code> para no reiniciar el servidor) y sin exponer tus claves secretas.<br>
+          • <b>Para que Render no olvide el token al apagarse:</b> ve a tu panel de Render → <i>Environment</i> → añade la variable <code>GITHUB_TOKEN</code> con tu token de GitHub (créalo en GitHub → <i>Settings → Developer settings → Personal access tokens</i> con permiso <b>repo / contents: write</b>).
+        </div>
+      </div>
+    </div>
 
     <h2>${icon("sparkles", 15)} Asistente Gemini (IA y voz)</h2>
     <div class="card">
@@ -1369,6 +1442,31 @@ async function renderSettings() {
     await api("PUT", "/api/settings", { goals, profile });
     toast("Objetivos y perfil biométrico guardados", true);
   };
+  $("#saveGhToken")?.addEventListener("click", async () => {
+    const t = $("#gh_token").value.trim();
+    if (!t) return toast("Pega un token de GitHub válido");
+    await api("POST", "/api/github/token", { token: t });
+    toast("Token de GitHub guardado y sincronizando...", true);
+    setTimeout(renderSettings, 1200);
+  });
+  $("#deleteGhToken")?.addEventListener("click", async () => {
+    await api("POST", "/api/github/token", { token: "" });
+    toast("Token eliminado", true);
+    renderSettings();
+  });
+  const doSync = async (mode, label) => {
+    toast(label + "...");
+    const r = await api("POST", "/api/github/sync", { mode });
+    if (r.ok) {
+      toast(r.pushed ? "DB subida a GitHub" : r.pulled ? "DB actualizada desde GitHub" : "Ya estaba al día", true);
+    } else {
+      toast(r.error || "No se pudo sincronizar");
+    }
+    renderSettings();
+  };
+  $("#syncGhNow")?.addEventListener("click", () => doSync("auto", "Sincronizando con GitHub"));
+  $("#pushGhNow")?.addEventListener("click", () => doSync("push", "Subiendo DB a GitHub"));
+  $("#pullGhNow")?.addEventListener("click", () => doSync("pull", "Descargando DB de GitHub"));
   $("#saveAiKey").onclick = async () => {
     const k = $("#gemini_key").value.trim();
     if (!k) return toast("Introduce una clave válida");

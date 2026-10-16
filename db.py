@@ -181,6 +181,9 @@ SEED_COMBOS = [
 ]
 
 
+_in_init = False
+
+
 @contextmanager
 def get_conn():
     """Abre una conexión, hace commit al salir y SIEMPRE la cierra
@@ -189,14 +192,23 @@ def get_conn():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    before = conn.total_changes
+    changed = False
     try:
         yield conn
         conn.commit()
+        changed = conn.total_changes > before
     except BaseException:
         conn.rollback()
         raise
     finally:
         conn.close()
+    if changed and not _in_init and "test.db" not in str(DB_PATH):
+        try:
+            import github_sync
+            github_sync.schedule_push()
+        except Exception:
+            pass
 
 
 def table_columns(conn, table):
@@ -223,40 +235,53 @@ def seed_combos(conn):
 
 
 def init_db():
-    with get_conn() as conn:
-        conn.executescript(SCHEMA)
+    global _in_init
+    _in_init = True
+    try:
+        # Al arrancar (ej. en Render tras despertar o en PC), traer la última DB de GitHub si existe
+        if "test.db" not in str(DB_PATH):
+            try:
+                import github_sync
+                github_sync.pull_from_github(force=False)
+            except Exception:
+                pass
 
-        # Migraciones para bases ya existentes
-        food_cols = table_columns(conn, "foods")
-        if "barcode" not in food_cols:
-            conn.execute("ALTER TABLE foods ADD COLUMN barcode TEXT DEFAULT ''")
-        if "category" not in food_cols:
-            conn.execute("ALTER TABLE foods ADD COLUMN category TEXT DEFAULT 'otros'")
+        with get_conn() as conn:
+            conn.executescript(SCHEMA)
 
-        preset_cols = table_columns(conn, "presets")
-        if "category" not in preset_cols:
-            conn.execute("ALTER TABLE presets ADD COLUMN category TEXT DEFAULT 'combos'")
+            # Migraciones para bases ya existentes
+            food_cols = table_columns(conn, "foods")
+            if "barcode" not in food_cols:
+                conn.execute("ALTER TABLE foods ADD COLUMN barcode TEXT DEFAULT ''")
+            if "category" not in food_cols:
+                conn.execute("ALTER TABLE foods ADD COLUMN category TEXT DEFAULT 'otros'")
 
-        # Actualiza o crea ajustes por defecto
-        for k, v in DEFAULT_SETTINGS.items():
-            conn.execute("INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)", (k, v))
+            preset_cols = table_columns(conn, "presets")
+            if "category" not in preset_cols:
+                conn.execute("ALTER TABLE presets ADD COLUMN category TEXT DEFAULT 'combos'")
 
-        # Sembrar o actualizar alimentos base
-        for f in SEED_FOODS:
-            row = conn.execute("SELECT id FROM foods WHERE name=?", (f[0],)).fetchone()
-            if not row:
-                conn.execute(
-                    "INSERT INTO foods(name, brand, kcal, protein, carbs, fat, unit_g, unit_name, category) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    f,
-                )
-            else:
-                # Mantener valores actualizados de los alimentos base
-                conn.execute(
-                    "UPDATE foods SET kcal=?, protein=?, carbs=?, fat=?, unit_g=?, unit_name=?, category=? "
-                    "WHERE id=?",
-                    (f[2], f[3], f[4], f[5], f[6], f[7], f[8], row["id"]),
-                )
+            # Actualiza o crea ajustes por defecto
+            for k, v in DEFAULT_SETTINGS.items():
+                conn.execute("INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)", (k, v))
 
-        # Sembrar combos predefinidos
-        seed_combos(conn)
+            # Sembrar o actualizar alimentos base
+            for f in SEED_FOODS:
+                row = conn.execute("SELECT id FROM foods WHERE name=?", (f[0],)).fetchone()
+                if not row:
+                    conn.execute(
+                        "INSERT INTO foods(name, brand, kcal, protein, carbs, fat, unit_g, unit_name, category) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        f,
+                    )
+                else:
+                    # Mantener valores actualizados de los alimentos base
+                    conn.execute(
+                        "UPDATE foods SET kcal=?, protein=?, carbs=?, fat=?, unit_g=?, unit_name=?, category=? "
+                        "WHERE id=?",
+                        (f[2], f[3], f[4], f[5], f[6], f[7], f[8], row["id"]),
+                    )
+
+            # Sembrar combos predefinidos
+            seed_combos(conn)
+    finally:
+        _in_init = False
