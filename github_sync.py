@@ -384,3 +384,4 @@ def get_status() -> dict:
         "syncing": _state["syncing"],
         "sha": (_state["last_Known_sha"] or "")[:7],
     }
+

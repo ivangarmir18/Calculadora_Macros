@@ -354,7 +354,8 @@ async function addPreset() {
   const presets = await api("GET", "/api/presets");
   openSheet(`${sheetHead("Añadir preset / combo")}${mealChips(guessMeal())}
     ${categoryChips(state.presetCat, "presetCatChips")}
-    <div id="presetList" style="margin-top:12px"></div>`);
+    <div id="presetList" style="margin-top:12px"></div>
+    <button class="btn block" style="margin-top:12px" onclick="editPreset()">${icon("plus", 18)} Crear nuevo preset / combo</button>`);
   bindMealChips();
 
   const bindCat = () => {
@@ -377,9 +378,17 @@ async function addPreset() {
         <div class="muted" style="font-size:.78rem;white-space:normal">${p.items.map((i) => `${r0(i.grams)}g ${esc(i.name)}`).join(" · ")}</div>
         ${macroLine(p.totals)}
       </div>
-      <div class="kcal-tag">${r0(p.totals.kcal)}<small>kcal</small></div></div>`).join("")
+      <div class="kcal-tag">${r0(p.totals.kcal)}<small>kcal</small></div>
+      <button type="button" class="icon-btn ghost edit-p-btn" data-id="${p.id}" title="Editar o borrar preset">${icon("pencil", 17)}</button></div>`).join("")
       : emptyBox("zap", "No hay presets en esta categoría.");
-    $$("#presetList .item").forEach((el) => el.onclick = () => pickPreset(presets.find((p) => p.id == el.dataset.id)));
+    $$("#presetList .item").forEach((el) => el.onclick = (ev) => {
+      if (ev.target.closest(".edit-p-btn")) return;
+      pickPreset(presets.find((p) => p.id == el.dataset.id));
+    });
+    $$("#presetList .edit-p-btn").forEach((btn) => btn.onclick = (ev) => {
+      ev.stopPropagation();
+      editPreset(+btn.dataset.id);
+    });
   };
   draw();
 }
@@ -392,7 +401,11 @@ function pickPreset(p) {
       <input data-k="${k}" data-base="${i.grams}" inputmode="decimal" value="${i.grams}"></div>`).join("")}
     <div class="preview"><div class="big" id="pk"></div><div id="pm"></div></div>
     <button class="btn primary block" id="addComboGrouped">${icon("zap", 18)} Añadir en 1 línea agrupada</button>
-    <button class="btn block" style="margin-top:8px" id="addComboItems">${icon("list", 18)} Añadir alimentos desglosados</button>`);
+    <button class="btn block" style="margin-top:8px" id="addComboItems">${icon("list", 18)} Añadir alimentos desglosados</button>
+    <div class="grid2" style="margin-top:10px">
+      <button class="btn small" id="savePresetGrams" title="Guarda estas cantidades como las nuevas por defecto del preset">${icon("check", 15)} Guardar gramos en preset</button>
+      <button class="btn small" id="goEditPreset">${icon("pencil", 15)} Editar / Borrar</button>
+    </div>`);
   bindMealChips();
   const upd = () => {
     const tot = { kcal: 0, protein: 0, carbs: 0, fat: 0 };
@@ -415,6 +428,15 @@ function pickPreset(p) {
     await api("POST", "/api/entries/preset", { date: state.date, meal: selectedMeal(), name: p.name, grouped: false, items });
     closeSheet(); toast("Alimentos añadidos por separado", true); renderToday();
   };
+
+  $("#savePresetGrams").onclick = async () => {
+    const items = getItems();
+    await api("PUT", `/api/presets/${p.id}`, { name: p.name, meal: selectedMeal(), category: p.category || "combos", items });
+    toast("Cantidades del preset actualizadas", true);
+    if (state.tab === "presets") renderPresets();
+  };
+
+  $("#goEditPreset").onclick = () => editPreset(p.id);
   upd();
 }
 
@@ -988,15 +1010,20 @@ async function renderPresets() {
           </div>
           <div class="title" style="font-size:1.05rem;font-weight:700">${esc(p.name)}</div>
         </div>
-        <div class="kcal-tag" style="font-size:1.15rem">${r0(p.totals.kcal)}<small>kcal</small></div>
+        <div class="row" style="gap:4px">
+          <button class="icon-btn ghost" onclick="editPreset(${p.id})" title="Editar combo / cambiar ingredientes">${icon("pencil", 17)}</button>
+          <button class="icon-btn ghost" style="color:var(--danger)" onclick="deletePresetDirect(${p.id})" title="Eliminar combo">${icon("trash", 17)}</button>
+          <div class="kcal-tag" style="font-size:1.15rem;margin-left:4px">${r0(p.totals.kcal)}<small>kcal</small></div>
+        </div>
       </div>
       <div class="combo-items-preview">
-        ${p.items.map((i) => `<b>${r0(i.grams)}g</b> ${esc(i.name)}`).join(" · ")}
+        ${p.items.map((i) => `<b>${r0(i.grams)}g</b> ${esc(i.name)}`).join(" · ") || "sin ingredientes"}
       </div>
-      <div class="row between" style="margin-top:10px">
+      <div class="row between" style="margin-top:10px;flex-wrap:wrap;gap:8px">
         <div>${macroLine(p.totals)}</div>
-        <div class="row" style="gap:6px">
-          <button class="btn small" onclick="customizeCombo(${p.id})">${icon("pencil", 14)} Desglosar</button>
+        <div class="row" style="gap:6px;flex-wrap:wrap">
+          <button class="btn small" onclick="editPreset(${p.id})">${icon("pencil", 14)} Editar</button>
+          <button class="btn small" onclick="customizeCombo(${p.id})">${icon("sliders", 14)} Desglosar</button>
           <button class="btn small primary" onclick="quickAddCombo(${p.id})">${icon("zap", 14)} 1-Clic hoy</button>
         </div>
       </div>
@@ -1012,12 +1039,17 @@ async function renderPresets() {
             <div class="muted" style="white-space:normal">${p.items.map((i) => `${esc(i.name)} ${r0(i.grams)} g`).join(" · ") || "sin ingredientes"}</div>
           </div>
         </div>
-        <div class="kcal-tag" style="font-size:1.1rem">${r0(p.totals.kcal)}<small>kcal</small></div>
+        <div class="row" style="gap:4px">
+          <button class="icon-btn ghost" onclick="editPreset(${p.id})" title="Editar preset">${icon("pencil", 17)}</button>
+          <button class="icon-btn ghost" style="color:var(--danger)" onclick="deletePresetDirect(${p.id})" title="Borrar preset">${icon("trash", 17)}</button>
+          <div class="kcal-tag" style="font-size:1.1rem;margin-left:4px">${r0(p.totals.kcal)}<small>kcal</small></div>
+        </div>
       </div>
-      <div class="row between" style="margin-top:12px">
+      <div class="row between" style="margin-top:12px;flex-wrap:wrap;gap:8px">
         ${macroLine(p.totals)}
         <div class="row" style="gap:6px">
           <button class="btn small" onclick="editPreset(${p.id})">${icon("pencil", 14)} Editar</button>
+          <button class="btn small danger" onclick="deletePresetDirect(${p.id})">${icon("trash", 14)} Borrar</button>
           <button class="btn small primary" onclick="addPresetToToday(${p.id})">${icon("plus", 14)} Añadir hoy</button>
         </div>
       </div>
@@ -1025,9 +1057,9 @@ async function renderPresets() {
 
   $("#view").innerHTML = `
     <h1>Platos Típicos & Presets</h1>
-    <p class="muted" style="margin-bottom:12px">Añade comidas compuestas habituales en 1 solo clic o desglosa sus ingredientes para ajustar los gramos.</p>
+    <p class="muted" style="margin-bottom:12px">Añade comidas compuestas habituales en 1 solo clic, edita sus ingredientes o bórralos cuando quieras.</p>
     ${categoryChips(state.presetCat, "presetCatFilter")}
-    <button class="btn primary block" style="margin:10px 0 16px" onclick="editPreset()">${icon("plus", 18)} Crear nuevo preset</button>
+    <button class="btn primary block" style="margin:10px 0 16px" onclick="editPreset()">${icon("plus", 18)} Crear nuevo preset / combo</button>
 
     <h2>${icon("zap", 15)} Platos Típicos (Combos Frecuentes)</h2>
     <div id="combosList">
@@ -1043,6 +1075,14 @@ async function renderPresets() {
     state.presetCat = b.dataset.cat;
     renderPresets();
   });
+}
+
+async function deletePresetDirect(id) {
+  if (!confirm("¿Seguro que quieres eliminar este preset/combo?")) return;
+  await api("DELETE", `/api/presets/${id}`);
+  toast("Preset eliminado", true);
+  if (state.tab === "presets") renderPresets();
+  else renderToday();
 }
 
 async function quickAddCombo(id) {
@@ -1092,19 +1132,45 @@ async function editPreset(id) {
     </select>
     <label>Ingredientes y cantidades (g)</label><div id="ings">${p.items.map(row).join("")}</div>
     <button class="btn small" id="addIng">${icon("plus", 14)} Añadir ingrediente</button>
-    <button class="btn primary block" style="margin-top:16px" id="ok">${icon("check", 18)} Guardar preset</button>
-    ${id ? `<button class="btn danger block" style="margin-top:8px" id="del">${icon("trash", 17)} Eliminar preset</button>` : ""}`);
+    <button class="btn primary block" style="margin-top:16px" id="ok">${icon("check", 18)} Guardar cambios</button>
+    ${id ? `<div class="grid2" style="margin-top:8px">
+      <button class="btn" id="dupPreset">${icon("copy", 17)} Duplicar como nuevo</button>
+      <button class="btn danger" id="del">${icon("trash", 17)} Eliminar preset</button>
+    </div>` : ""}`);
   bindMealChips();
   const bindRemove = () => $$("#ings .preset-ing button").forEach((b) => b.onclick = () => b.parentElement.remove());
   bindRemove();
   $("#addIng").onclick = () => { $("#ings").insertAdjacentHTML("beforeend", row({ food_id: foods[0]?.id, grams: 100 })); bindRemove(); };
-  $("#ok").onclick = async () => {
+  const collectBody = () => {
     const items = $$("#ings .preset-ing").map((r) => ({ food_id: +$("select", r).value, grams: toNum($("input", r).value) }));
-    const body = { name: $("#pn").value, meal: $("#mealChips .chip.on")?.dataset.meal || "", category: $("#p_category").value, items };
-    await (id ? api("PUT", `/api/presets/${id}`, body) : api("POST", "/api/presets", body));
-    closeSheet(); renderPresets();
+    return { name: $("#pn").value.trim(), meal: $("#mealChips .chip.on")?.dataset.meal || "", category: $("#p_category").value, items };
   };
-  if (id) $("#del").onclick = async () => { if (confirm("¿Eliminar preset?")) { await api("DELETE", `/api/presets/${id}`); closeSheet(); renderPresets(); } };
+  $("#ok").onclick = async () => {
+    const body = collectBody();
+    if (!body.name) return toast("Ponle un nombre al preset");
+    await (id ? api("PUT", `/api/presets/${id}`, body) : api("POST", "/api/presets", body));
+    closeSheet();
+    toast(id ? "Preset actualizado" : "Preset creado", true);
+    if (state.tab === "presets") renderPresets(); else renderToday();
+  };
+  if (id) {
+    $("#dupPreset").onclick = async () => {
+      const body = collectBody();
+      body.name = (body.name || p.name) + " (copia)";
+      await api("POST", "/api/presets", body);
+      closeSheet();
+      toast("Preset duplicado", true);
+      if (state.tab === "presets") renderPresets(); else renderToday();
+    };
+    $("#del").onclick = async () => {
+      if (confirm("¿Eliminar este preset/combo?")) {
+        await api("DELETE", `/api/presets/${id}`);
+        closeSheet();
+        toast("Preset eliminado", true);
+        if (state.tab === "presets") renderPresets(); else renderToday();
+      }
+    };
+  }
 }
 
 // ===================================================================== ALIMENTOS
@@ -1129,8 +1195,25 @@ async function renderFoods() {
       const matchQ = !q || (f.name + " " + (f.brand || "")).toLowerCase().includes(q);
       return matchCat && matchQ;
     });
-    $("#fl").innerHTML = list.map((f) => foodRow(f)).join("") || emptyBox("search", "No hay alimentos que coincidan.");
-    $$("#fl .item").forEach((el) => el.onclick = () => editFood(+el.dataset.id, foods));
+    $("#fl").innerHTML = list.map((f) => foodRow(
+      f,
+      `<div class="row" style="gap:2px;margin-left:6px">
+        <button type="button" class="icon-btn ghost food-edit-btn" data-id="${f.id}" title="Editar alimento">${icon("pencil", 16)}</button>
+        <button type="button" class="icon-btn ghost food-del-btn" style="color:var(--danger)" data-id="${f.id}" title="Eliminar alimento">${icon("trash", 16)}</button>
+      </div>`
+    )).join("") || emptyBox("search", "No hay alimentos que coincidan.");
+    $$("#fl .item").forEach((el) => el.onclick = (ev) => {
+      if (ev.target.closest(".food-del-btn")) return;
+      editFood(+el.dataset.id, foods);
+    });
+    $$("#fl .food-del-btn").forEach((btn) => btn.onclick = async (ev) => {
+      ev.stopPropagation();
+      const fid = +btn.dataset.id;
+      if (!confirm("¿Eliminar este alimento?")) return;
+      await api("DELETE", `/api/foods/${fid}`);
+      toast("Alimento eliminado", true);
+      renderFoods();
+    });
   };
 
   $$("#foodCatFilter .cat-chip").forEach((b) => b.onclick = () => {

@@ -264,24 +264,24 @@ def init_db():
             for k, v in DEFAULT_SETTINGS.items():
                 conn.execute("INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)", (k, v))
 
-            # Sembrar o actualizar alimentos base
-            for f in SEED_FOODS:
-                row = conn.execute("SELECT id FROM foods WHERE name=?", (f[0],)).fetchone()
-                if not row:
-                    conn.execute(
-                        "INSERT INTO foods(name, brand, kcal, protein, carbs, fat, unit_g, unit_name, category) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        f,
-                    )
-                else:
-                    # Mantener valores actualizados de los alimentos base
-                    conn.execute(
-                        "UPDATE foods SET kcal=?, protein=?, carbs=?, fat=?, unit_g=?, unit_name=?, category=? "
-                        "WHERE id=?",
-                        (f[2], f[3], f[4], f[5], f[6], f[7], f[8], row["id"]),
-                    )
+            # Sembrar alimentos base solo si no se han sembrado antes (o si la tabla está vacía)
+            foods_count = conn.execute("SELECT COUNT(*) FROM foods").fetchone()[0]
+            already_seeded_foods = conn.execute("SELECT value FROM settings WHERE key='seeded_foods_v1'").fetchone()
+            if foods_count == 0 or not already_seeded_foods:
+                for f in SEED_FOODS:
+                    row = conn.execute("SELECT id FROM foods WHERE name=?", (f[0],)).fetchone()
+                    if not row:
+                        conn.execute(
+                            "INSERT INTO foods(name, brand, kcal, protein, carbs, fat, unit_g, unit_name, category) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            f,
+                        )
+                conn.execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('seeded_foods_v1', '1')")
 
-            # Sembrar combos predefinidos
-            seed_combos(conn)
+            # Sembrar combos predefinidos solo la primera vez para permitir editarlos o borrarlos libremente
+            already_seeded_combos = conn.execute("SELECT value FROM settings WHERE key='seeded_combos_v1'").fetchone()
+            if not already_seeded_combos:
+                seed_combos(conn)
+                conn.execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('seeded_combos_v1', '1')")
     finally:
         _in_init = False

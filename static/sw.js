@@ -1,6 +1,6 @@
 /* Service worker: la app abre al instante y arranca aunque el servidor esté un momento caído.
    Estrategia: red primero, caché como respaldo. Los datos (/api) nunca se cachean, para no mostrar cifras viejas. */
-const CACHE = "macros-v1";
+const CACHE = "macros-v3";
 const SHELL = ["/", "/static/style.css", "/static/icons.js", "/static/charts.js", "/static/app.js", "/static/icons/icon.svg"];
 
 self.addEventListener("install", (e) => {
