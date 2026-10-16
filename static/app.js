@@ -39,7 +39,17 @@ function setLocalCache(key, val) {
 }
 
 let lastToday = isoDate(new Date());
-const state = { tab: "today", date: lastToday, foodQuery: "", histDays: 7, foodCat: "todos", presetCat: "todos" };
+const state = {
+  tab: "today",
+  date: lastToday,
+  foodQuery: "",
+  histDays: 7,
+  histMode: "days",
+  histWeeks: 12,
+  weightDays: 14,
+  foodCat: "todos",
+  presetCat: "todos",
+};
 
 // ---------------------------------------------------------------------- red
 async function api(method, url, body) {
@@ -92,16 +102,23 @@ const foodRow = (f, extra = "", fallback = "apple") => `<div class="item" data-i
 const emptyBox = (ic, text) => `<div class="empty">${icon(ic, 40)}<div>${text}</div></div>`;
 
 // ----------------------------------------------------------------- navegación
-const TABS = [["today", "home", "Hoy"], ["presets", "zap", "Presets"], ["foods", "apple", "Alimentos"], ["progress", "chart", "Progreso"], ["settings", "sliders", "Ajustes"]];
+const TABS = [
+  ["today", "home", "Hoy"],
+  ["presets", "zap", "Presets"],
+  ["foods", "apple", "Alimentos"],
+  ["weights", "gauge", "Peso"],
+  ["progress", "chart", "Progreso"],
+  ["settings", "sliders", "Ajustes"],
+];
 function buildNav() {
   $("#tabs").innerHTML = `<div class="brand">${icon("flame", 30)}</div>` + TABS.map(([id, ic, label]) =>
-    `<button data-tab="${id}" class="${id === state.tab ? "active" : ""}">${icon(ic, 23)}${label}</button>`).join("");
+    `<button data-tab="${id}" class="${id === state.tab ? "active" : ""}">${icon(ic, 22)}${label}</button>`).join("");
   $$("#tabs button").forEach((b) => b.onclick = () => go(b.dataset.tab));
 }
 function go(tab) { state.tab = tab; buildNav(); render(); }
 function render() {
   document.body.classList.remove("locked");
-  ({ today: renderToday, presets: renderPresets, foods: renderFoods, progress: renderProgress, settings: renderSettings })[state.tab]();
+  ({ today: renderToday, presets: renderPresets, foods: renderFoods, weights: renderWeights, progress: renderProgress, settings: renderSettings })[state.tab]();
   window.scrollTo(0, 0);
 }
 // Si la app se queda abierta toda la noche, al volver pasa a "hoy" sola
@@ -1270,19 +1287,339 @@ function editFood(id, foods) {
   if (id) $("#del").onclick = async () => { if (confirm("¿Eliminar alimento? El histórico se conserva.")) { await api("DELETE", `/api/foods/${id}`); closeSheet(); renderFoods(); } };
 }
 
-// ===================================================================== PROGRESO
+// ===================================================================== PESO (DESGLOSADO DÍA POR DÍA)
+async function syncWeightsJournal() {
+  let weights = await api("GET", "/api/weights");
+  if (weights && weights.length > 0) {
+    setLocalCache("journal_weights", weights);
+  } else {
+    const saved = getLocalCache("journal_weights", []);
+    if (Array.isArray(saved) && saved.length > 0) {
+      try {
+        for (const w of saved) {
+          await api("POST", "/api/weights", { date: w.date, kg: w.kg });
+        }
+        weights = await api("GET", "/api/weights");
+      } catch {}
+    }
+  }
+  return weights;
+}
+
+async function renderWeights() {
+  const [weights, s] = await Promise.all([syncWeightsJournal(), api("GET", "/api/settings")]);
+  const todayStr = isoDate(new Date());
+  const byDate = Object.fromEntries(weights.map((w) => [w.date, w.kg]));
+  const lastW = weights[weights.length - 1];
+  const firstW = weights[0];
+  const totalDiff = lastW && firstW ? r1(lastW.kg - firstW.kg) : 0;
+
+  // Media últimos 7 días con registro
+  const w7From = shiftDay(todayStr, -6);
+  const w7List = weights.filter((w) => w.date >= w7From);
+  const avg7 = w7List.length ? r1(w7List.reduce((acc, x) => acc + x.kg, 0) / w7List.length) : null;
+
+  const daysCount = state.weightDays || 14;
+  const dayRows = [];
+  for (let i = 0; i < daysCount; i++) {
+    const dt = shiftDay(todayStr, -i);
+    const kg = byDate[dt];
+    // Buscar el peso inmediatamente anterior para mostrar la variación
+    let prevKg = null;
+    for (let j = weights.length - 1; j >= 0; j--) {
+      if (weights[j].date < dt) {
+        prevKg = weights[j].kg;
+        break;
+      }
+    }
+    const diff = kg !== undefined && prevKg !== null ? r1(kg - prevKg) : null;
+    dayRows.push({ date: dt, kg, diff, isToday: i === 0, isYesterday: i === 1 });
+  }
+
+  const olderWeights = weights.filter((w) => w.date < shiftDay(todayStr, -(daysCount - 1))).slice().reverse();
+
+  $("#view").innerHTML = `
+    <h1>Control de Peso Diario</h1>
+    <p class="muted" style="margin-bottom:12px">Apunta tu peso de hoy o rellena días anteriores si se te olvidó. Todo se sincroniza en la base de datos y en las gráficas de progreso.</p>
+
+    <div class="bio-card">
+      <div class="row between">
+        <strong>${icon("gauge", 16)} Resumen de Evolución</strong>
+        ${lastW ? `<span class="combo-badge" style="background:var(--accent);color:var(--accent-ink)">Último: ${lastW.date}</span>` : ""}
+      </div>
+      <div class="bio-grid">
+        <div class="bio-item">
+          <div class="lbl">Peso Actual</div>
+          <div class="val">${lastW ? `${lastW.kg} kg` : `${s.profile?.weight || 119} kg`}</div>
+        </div>
+        <div class="bio-item">
+          <div class="lbl">Media (7 días)</div>
+          <div class="val" style="color:var(--p)">${avg7 ? `${avg7} kg` : "—"}</div>
+        </div>
+        <div class="bio-item">
+          <div class="lbl">Cambio Total</div>
+          <div class="val" style="color:${totalDiff <= 0 ? "var(--accent)" : "var(--danger)"}">${weights.length > 1 ? `${totalDiff > 0 ? "+" : ""}${totalDiff} kg` : "—"}</div>
+        </div>
+        <div class="bio-item">
+          <div class="lbl">Registros Totales</div>
+          <div class="val">${weights.length} días</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="row between" style="margin-bottom:8px">
+        <strong>${icon("plus", 16)} Apuntar peso en cualquier fecha</strong>
+        <div class="row" style="gap:4px">
+          <button type="button" class="chip on" id="wBtnToday">Hoy</button>
+          <button type="button" class="chip" id="wBtnYest">Ayer</button>
+          <button type="button" class="chip" id="wBtnBefore">Anteayer</button>
+        </div>
+      </div>
+      <div class="grid2" style="gap:8px;align-items:end">
+        <div>
+          <label style="margin-top:0">Fecha</label>
+          <input id="w_custom_date" type="date" value="${todayStr}">
+        </div>
+        <div>
+          <label style="margin-top:0">Peso (kg)</label>
+          <input id="w_custom_kg" inputmode="decimal" placeholder="Ej. 118.4" value="${byDate[todayStr] ?? ""}">
+        </div>
+      </div>
+      <button class="btn primary block" style="margin-top:10px" id="wSaveCustom">${icon("check", 18)} Guardar peso en esta fecha</button>
+    </div>
+
+    <div class="card">
+      <div class="row between" style="margin-bottom:6px">
+        <strong>${icon("chart", 16)} Curva de Peso</strong>
+        <span class="muted" style="font-size:.78rem">${weights.length} pesajes</span>
+      </div>
+      <div style="margin:8px 0">${lineChart(weights.slice(-90))}</div>
+    </div>
+
+    <div class="row between" style="margin:18px 2px 8px">
+      <h2 style="margin:0">${icon("home", 15)} Desglose Día por Día (Rellenar días pasados)</h2>
+      <div class="seg" style="width:auto">
+        ${[14, 30, 60].map((d) => `<button style="padding:4px 10px;font-size:.75rem" class="${daysCount === d ? "on" : ""}" onclick="state.weightDays=${d};renderWeights()">${d}d</button>`).join("")}
+      </div>
+    </div>
+
+    <div id="weightDayList">
+      ${dayRows.map((r) => {
+        const dLabel = parseISO(r.date).toLocaleDateString("es-ES", { weekday: "short", day: "numeric", month: "short" });
+        const badge = r.isToday ? "Hoy · " : r.isYesterday ? "Ayer · " : "";
+        const diffHtml = r.diff !== null
+          ? `<span style="font-size:.76rem;font-weight:700;color:${r.diff <= 0 ? "var(--accent)" : "var(--danger)"}">${r.diff > 0 ? "▲ +" : "▼ "}${r.diff} kg</span>`
+          : "";
+        return `
+        <div class="card" style="padding:10px 14px;margin-bottom:8px;border-color:${r.kg !== undefined ? "color-mix(in srgb, var(--accent) 30%, var(--line))" : "var(--line)"}">
+          <div class="row between" style="gap:10px">
+            <div class="grow">
+              <div style="font-weight:700;text-transform:capitalize;font-size:.95rem">
+                ${badge}${esc(dLabel)}
+                <span class="muted" style="font-weight:400;font-size:.78rem">(${r.date})</span>
+              </div>
+              <div style="margin-top:2px">
+                ${r.kg !== undefined
+                  ? `<span style="color:var(--accent);font-size:.8rem;font-weight:600">✓ Registrado: ${r.kg} kg</span> · ${diffHtml}`
+                  : `<span class="muted" style="font-size:.8rem">○ Sin apuntar — escribe a la derecha para guardarlo</span>`}
+              </div>
+            </div>
+            <div class="row" style="gap:6px;flex:none">
+              <input class="w-day-input" data-date="${r.date}" inputmode="decimal" placeholder="kg" value="${r.kg ?? ""}" style="width:86px;padding:7px 9px;text-align:center;font-weight:700">
+              <button type="button" class="btn primary small w-day-save" data-date="${r.date}" title="Guardar peso de este día" style="padding:8px 10px">${icon("check", 16)}</button>
+              ${r.kg !== undefined ? `<button type="button" class="icon-btn ghost w-day-del" data-date="${r.date}" style="color:var(--danger);width:32px;height:32px" title="Borrar peso de este día">${icon("trash", 15)}</button>` : ""}
+            </div>
+          </div>
+        </div>`;
+      }).join("")}
+    </div>
+
+    ${olderWeights.length ? `
+      <h2>${icon("chart", 15)} Pesajes anteriores (+${daysCount} días)</h2>
+      <div class="card" style="padding:8px 12px">
+        ${olderWeights.map((w) => `
+          <div class="row between" style="padding:7px 0;border-bottom:1px solid var(--line)">
+            <div>
+              <strong style="text-transform:capitalize">${parseISO(w.date).toLocaleDateString("es-ES", { weekday: "short", day: "numeric", month: "short", year: "numeric" })}</strong>
+              <span class="muted" style="font-size:.78rem">(${w.date})</span>
+            </div>
+            <div class="row" style="gap:8px">
+              <span style="font-weight:700;color:var(--p)">${w.kg} kg</span>
+              <button type="button" class="icon-btn ghost w-day-del" data-date="${w.date}" style="color:var(--danger);width:30px;height:30px" title="Borrar">${icon("trash", 15)}</button>
+            </div>
+          </div>
+        `).join("")}
+      </div>
+    ` : ""}
+  `;
+
+  const setDateQuick = (offset, btn) => {
+    $$("#wBtnToday, #wBtnYest, #wBtnBefore").forEach((b) => b.classList.remove("on"));
+    btn.classList.add("on");
+    const dt = shiftDay(todayStr, offset);
+    $("#w_custom_date").value = dt;
+    $("#w_custom_kg").value = byDate[dt] ?? "";
+    $("#w_custom_kg").focus();
+  };
+  $("#wBtnToday").onclick = (e) => setDateQuick(0, e.currentTarget);
+  $("#wBtnYest").onclick = (e) => setDateQuick(-1, e.currentTarget);
+  $("#wBtnBefore").onclick = (e) => setDateQuick(-2, e.currentTarget);
+  $("#w_custom_date").onchange = () => {
+    const dt = $("#w_custom_date").value;
+    $("#w_custom_kg").value = byDate[dt] ?? "";
+  };
+
+  const saveWeightForDate = async (dt, kgVal) => {
+    const kg = toNum(kgVal);
+    if (!kg || kg < 20 || kg > 400) return toast("Introduce un peso válido (20-400 kg)");
+    await api("POST", "/api/weights", { date: dt, kg });
+    toast(`Peso del ${dt} guardado (${kg} kg)`, true);
+    renderWeights();
+  };
+
+  $("#wSaveCustom").onclick = () => saveWeightForDate($("#w_custom_date").value, $("#w_custom_kg").value);
+  $("#w_custom_kg").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") saveWeightForDate($("#w_custom_date").value, $("#w_custom_kg").value);
+  });
+
+  $$(".w-day-save").forEach((btn) => {
+    btn.onclick = () => {
+      const dt = btn.dataset.date;
+      const inp = $(`.w-day-input[data-date="${dt}"]`);
+      saveWeightForDate(dt, inp?.value);
+    };
+  });
+
+  $$(".w-day-input").forEach((inp) => {
+    inp.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") saveWeightForDate(inp.dataset.date, inp.value);
+    });
+  });
+
+  $$(".w-day-del").forEach((btn) => {
+    btn.onclick = async () => {
+      const dt = btn.dataset.date;
+      if (!confirm(`¿Eliminar el peso del día ${dt}?`)) return;
+      const cur = getLocalCache("journal_weights", []);
+      setLocalCache("journal_weights", cur.filter((x) => x.date !== dt));
+      await api("DELETE", `/api/weights/${dt}`);
+      toast("Peso eliminado");
+      renderWeights();
+    };
+  });
+}
+
+// ===================================================================== PROGRESO (DÍAS Y 12 / 52 SEMANAS)
 async function renderProgress() {
-  const n = state.histDays;
-  const [h, weights, s] = await Promise.all([api("GET", `/api/history?days=${n}`), api("GET", "/api/weights"), api("GET", "/api/settings")]);
+  const isWeeks = state.histMode === "weeks";
+  const n = state.histDays || 7;
+  const wCount = state.histWeeks || 12;
+
+  if (isWeeks) {
+    const [ws, weights] = await Promise.all([
+      api("GET", `/api/history/weeks?weeks=${wCount}&date=${state.date}`),
+      syncWeightsJournal(),
+    ]);
+    const g = ws.goals, a = ws.average, bio = ws.biometrics;
+    const tdee = toNum(bio.tdee || 3350);
+    const lbm = toNum(bio.lbm || 85.5);
+    const weight = toNum(bio.weight || 119);
+    const diff = a.kcal - g.kcal;
+    const kc = a.protein * 4 + a.carbs * 4 + a.fat * 9;
+    const share = (v) => kc ? Math.round(v / kc * 100) : 0;
+    const series = ws.weeks.map((w) => ({ date: w.end_date, kcal: w.kcal }));
+
+    $("#view").innerHTML = `<h1>Progreso & Informes Semanales</h1>
+      <div class="bio-card">
+        <div class="row between">
+          <strong>${icon("target", 16)} Balance de Largo Plazo (${wCount} semanas)</strong>
+          <span class="combo-badge" style="background:var(--accent);color:var(--accent-ink)">Déficit Acum: -${r0(ws.total_deficit)} kcal</span>
+        </div>
+        <div class="bio-grid">
+          <div class="bio-item"><div class="lbl">Semanas Activas</div><div class="val">${ws.active_weeks}/${wCount} <small class="muted">(${ws.total_logged_days}d)</small></div></div>
+          <div class="bio-item"><div class="lbl">Grasa Teórica Oxidada</div><div class="val" style="color:var(--accent)">-${ws.est_fat_loss_kg} kg</div></div>
+          <div class="bio-item"><div class="lbl">Evolución de Peso</div><div class="val">${ws.start_weight && ws.end_weight ? `${ws.start_weight} → ${ws.end_weight} kg` : `${weight} kg`}</div></div>
+          <div class="bio-item"><div class="lbl">Cambio de Peso</div><div class="val" style="color:${(ws.weight_change || 0) <= 0 ? "var(--accent)" : "var(--danger)"}">${ws.weight_change !== null ? `${ws.weight_change > 0 ? "+" : ""}${ws.weight_change} kg` : "—"}</div></div>
+        </div>
+      </div>
+
+      <div class="card" style="border-color:color-mix(in srgb, var(--accent) 35%, var(--line));background:color-mix(in srgb, var(--accent) 5%, var(--card))">
+        <div class="row between" style="gap:12px;flex-wrap:wrap">
+          <div>
+            <div class="row" style="gap:6px;margin-bottom:2px">
+              <span class="combo-badge" style="background:var(--accent);color:var(--accent-ink)">${icon("chart", 12)} Informe PDF por Semanas</span>
+              <span class="muted" style="font-size:.78rem">· Últimas ${wCount} semanas (${ws.start_date} a ${ws.end_date})</span>
+            </div>
+            <strong style="font-size:1.05rem;display:block;margin:2px 0">Descargar Informe Ejecutivo de ${wCount} Semanas en PDF</strong>
+            <div class="muted" style="font-size:.84rem">Incluye gráfica de evolución semanal, pérdida de grasa estimada, peso medio por semana y desglose completo.</div>
+          </div>
+          <div class="row" style="gap:8px;flex-wrap:wrap">
+            <a class="btn primary" href="/api/export/pdf?mode=weeks&weeks=12&date=${state.date}" download style="padding:10px 14px;font-size:.88rem">
+              ${icon("download", 16)} PDF 12 Semanas
+            </a>
+            <a class="btn primary" href="/api/export/pdf?mode=weeks&weeks=52&date=${state.date}" download style="padding:10px 14px;font-size:.88rem">
+              ${icon("download", 16)} PDF 52 Semanas (1 Año)
+            </a>
+          </div>
+        </div>
+      </div>
+
+      <div class="seg" style="margin-bottom:14px">
+        ${[7, 30, 90].map((d) => `<button onclick="state.histMode='days';state.histDays=${d};renderProgress()">${d} días</button>`).join("")}
+        <button class="${wCount === 12 ? "on" : ""}" onclick="state.histMode='weeks';state.histWeeks=12;renderProgress()">12 semanas</button>
+        <button class="${wCount === 52 ? "on" : ""}" onclick="state.histMode='weeks';state.histWeeks=52;renderProgress()">52 semanas</button>
+      </div>
+
+      <div class="card">
+        <div class="muted">Promedio diario en las ${wCount} semanas · ${ws.total_logged_days} día(s) registrados</div>
+        <div class="row between" style="margin:8px 0 12px"><div><span class="big">${r0(a.kcal)}</span> <span class="muted">kcal/día</span></div>
+          ${ws.total_logged_days ? `<div class="chip" style="cursor:default;color:${diff > g.kcal * 0.10 ? "var(--danger)" : "var(--accent)"}">${diff > 0 ? "+" : ""}${r0(diff)} vs objetivo</div>` : ""}</div>
+        ${barChart(series, g.kcal)}
+      </div>
+
+      <div class="card"><div class="donut-row">${donutChart(a.protein, a.carbs, a.fat)}
+        <div class="legend">
+          <div><i style="background:var(--p)"></i>Proteína · <b>${r0(a.protein)} g</b> · ${share(a.protein * 4)}%</div>
+          <div><i style="background:var(--c)"></i>Hidratos · <b>${r0(a.carbs)} g</b> · ${share(a.carbs * 4)}%</div>
+          <div><i style="background:var(--f)"></i>Grasa · <b>${r0(a.fat)} g</b> · ${share(a.fat * 9)}%</div></div></div></div>
+
+      <h2>${icon("chart", 15)} Desglose Semana por Semana (${wCount} semanas)</h2>
+      ${ws.weeks.slice().reverse().map((w) => `
+        <div class="card" style="padding:12px 14px;margin-bottom:8px;opacity:${w.logged_days || w.avg_weight ? "1" : "0.65"}">
+          <div class="row between">
+            <div>
+              <div class="title" style="font-size:.98rem">${esc(w.label)}</div>
+              <div class="muted" style="font-size:.78rem">
+                ${w.logged_days}/7 días registrados
+                ${w.avg_weight ? ` · <b style="color:var(--p)">Peso medio: ${w.avg_weight} kg</b>` : ""}
+                ${w.weight_diff !== null ? ` <span style="color:${w.weight_diff <= 0 ? "var(--accent)" : "var(--danger)"};font-weight:700">(${w.weight_diff > 0 ? "+" : ""}${w.weight_diff} kg)</span>` : ""}
+              </div>
+            </div>
+            <div class="kcal-tag" style="text-align:right">
+              ${w.logged_days ? `${r0(w.kcal)}<small>kcal/día</small>` : `<span class="muted" style="font-size:.82rem">Sin comidas</span>`}
+              ${w.logged_days ? `<div style="font-size:.74rem;color:${w.avg_deficit >= 0 ? "var(--accent)" : "var(--danger)"}">${w.avg_deficit >= 0 ? "-" : "+"}${r0(Math.abs(w.avg_deficit))} kcal déf.</div>` : ""}
+            </div>
+          </div>
+          ${w.logged_days ? `<div style="margin-top:6px">${macroLine(w)}
+            <div class="bar ${w.kcal > g.kcal * 1.10 ? "over" : ""}"><i style="width:${Math.min(100, w.kcal / g.kcal * 100)}%;background:var(--kcal)"></i></div>
+          </div>` : ""}
+        </div>
+      `).join("")}
+    `;
+    return;
+  }
+
+  const [h, weights, s] = await Promise.all([api("GET", `/api/history?days=${n}`), syncWeightsJournal(), api("GET", "/api/settings")]);
   const g = h.goals, a = h.average, p = s.profile || {};
   const tdee = toNum(p.tdee || 3350);
   const lbm = toNum(p.lbm || 85.5);
-  const weight = toNum(p.weight || 119);
+  const lastW = weights[weights.length - 1];
+  const weight = lastW ? lastW.kg : toNum(p.weight || 119);
   const byDate = Object.fromEntries(h.days.map((d) => [d.date, d]));
   const series = []; for (let i = n - 1; i >= 0; i--) { const dt = shiftDay(isoDate(new Date()), -i); series.push({ date: dt, kcal: byDate[dt]?.kcal || 0 }); }
   const wFrom = shiftDay(isoDate(new Date()), -Math.max(n, 30));
   const wSel = weights.filter((w) => w.date >= wFrom);
-  const lastW = weights[weights.length - 1];
   const diff = a.kcal - g.kcal;
   const kc = a.protein * 4 + a.carbs * 4 + a.fat * 9;
   const share = (v) => kc ? Math.round(v / kc * 100) : 0;
@@ -1305,24 +1642,34 @@ async function renderProgress() {
       <div class="row between" style="gap:12px;flex-wrap:wrap">
         <div>
           <div class="row" style="gap:6px;margin-bottom:2px">
-            <span class="combo-badge" style="background:var(--accent);color:var(--accent-ink)">${icon("chart", 12)} Informe PDF del Proceso</span>
-            <span class="muted" style="font-size:.78rem">· Periodo de ${n} días</span>
+            <span class="combo-badge" style="background:var(--accent);color:var(--accent-ink)">${icon("chart", 12)} Informes PDF del Proceso</span>
+            <span class="muted" style="font-size:.78rem">· Diario y Semanal (12 y 52 semanas)</span>
           </div>
-          <strong style="font-size:1.05rem;display:block;margin:2px 0">Descargar resumen detallado en PDF</strong>
-          <div class="muted" style="font-size:.84rem">Incluye gráfica de barritas de calorías día por día, déficit acumulado, macros y tabla completa.</div>
+          <strong style="font-size:1.05rem;display:block;margin:2px 0">Descargar informe detallado en PDF</strong>
+          <div class="muted" style="font-size:.84rem">Descarga el informe de los últimos ${n} días, o los informes por semanas (12 semanas o 52 semanas).</div>
         </div>
-        <div class="row" style="gap:8px">
-          <a class="btn primary" href="/api/export/pdf?date=${state.date}&days=${n}" download style="padding:10px 14px;font-size:.9rem">
-            ${icon("download", 16)} Descargar PDF (${n} días)
+        <div class="row" style="gap:6px;flex-wrap:wrap">
+          <a class="btn primary" href="/api/export/pdf?date=${state.date}&days=${n}" download style="padding:9px 12px;font-size:.85rem">
+            ${icon("download", 15)} PDF (${n} días)
           </a>
-          <a class="btn" href="/report?date=${state.date}&days=${n}" target="_blank" title="Ver en navegador" style="padding:10px 12px">
-            ${icon("eye", 16)}
+          <a class="btn" href="/api/export/pdf?mode=weeks&weeks=12&date=${state.date}" download style="padding:9px 12px;font-size:.85rem">
+            ${icon("download", 15)} PDF 12 Sem.
+          </a>
+          <a class="btn" href="/api/export/pdf?mode=weeks&weeks=52&date=${state.date}" download style="padding:9px 12px;font-size:.85rem">
+            ${icon("download", 15)} PDF 52 Sem.
+          </a>
+          <a class="btn" href="/report?date=${state.date}&days=${n}" target="_blank" title="Ver en navegador" style="padding:9px 10px">
+            ${icon("eye", 15)}
           </a>
         </div>
       </div>
     </div>
 
-    <div class="seg" style="margin-bottom:14px">${[7, 30, 90].map((d) => `<button class="${d === n ? "on" : ""}" onclick="state.histDays=${d};renderProgress()">${d} días</button>`).join("")}</div>
+    <div class="seg" style="margin-bottom:14px">
+      ${[7, 30, 90].map((d) => `<button class="${d === n ? "on" : ""}" onclick="state.histMode='days';state.histDays=${d};renderProgress()">${d} días</button>`).join("")}
+      <button onclick="state.histMode='weeks';state.histWeeks=12;renderProgress()">12 semanas</button>
+      <button onclick="state.histMode='weeks';state.histWeeks=52;renderProgress()">52 semanas</button>
+    </div>
     <div class="card">
       <div class="muted">Promedio diario · ${h.logged_days} día(s) con registros</div>
       <div class="row between" style="margin:8px 0 12px"><div><span class="big">${r0(a.kcal)}</span> <span class="muted">kcal</span></div>
@@ -1335,9 +1682,12 @@ async function renderProgress() {
         <div><i style="background:var(--c)"></i>Hidratos · <b>${r0(a.carbs)} g</b> · ${share(a.carbs * 4)}%</div>
         <div><i style="background:var(--f)"></i>Grasa · <b>${r0(a.fat)} g</b> · ${share(a.fat * 9)}%</div></div></div></div>
 
-    <h2>${icon("gauge", 15)} Peso</h2>
+    <h2>${icon("gauge", 15)} Evolución de Peso</h2>
     <div class="card">
-      <div class="row between"><div>${lastW ? `<span class="big">${lastW.kg}</span> <span class="muted">kg · ${lastW.date}</span>` : '<span class="muted">Sin pesos apuntados</span>'}</div></div>
+      <div class="row between">
+        <div>${lastW ? `<span class="big">${lastW.kg}</span> <span class="muted">kg · ${lastW.date}</span>` : '<span class="muted">Sin pesos apuntados</span>'}</div>
+        <button class="btn small" onclick="go('weights')">${icon("gauge", 14)} Abrir pestaña Peso (día por día)</button>
+      </div>
       <div style="margin:10px 0">${lineChart(wSel)}</div>
       <div class="row"><input id="wk" inputmode="decimal" placeholder="Peso de hoy (kg)" value="${lastW?.date === isoDate(new Date()) ? lastW.kg : ""}">
         <button class="btn primary" id="saveW">${icon("check", 18)}</button></div>

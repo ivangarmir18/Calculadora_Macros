@@ -401,6 +401,19 @@ def history():
         return jsonify(days=data, average=avg, logged_days=len(data), goals=get_goals(conn))
 
 
+@app.get("/api/history/weeks")
+def history_weeks():
+    """Informe agregado por semanas (ej. 12 semanas o 52 semanas)."""
+    target_date = request.args.get("date") or date.today().isoformat()
+    valid_date(target_date)
+    try:
+        weeks = max(1, min(int(request.args.get("weeks", 12)), 104))
+    except ValueError:
+        weeks = 12
+    with get_conn() as conn:
+        return jsonify(pdf_report.compute_weekly_summary(conn, target_date=target_date, weeks_count=weeks))
+
+
 # --------------------------------------------------------------------- peso
 @app.get("/api/weights")
 def list_weights():
@@ -411,14 +424,17 @@ def list_weights():
 @app.post("/api/weights")
 def put_weight():
     d = request.get_json(force=True)
-    kg = num(d.get("kg"))
+    kg = round(num(d.get("kg")), 1)
     if not 20 <= kg <= 400:
         abort(400, "Peso no válido")
     day = valid_date(d.get("date") or date.today().isoformat())
     with get_conn() as conn:
         conn.execute("INSERT INTO weights(date,kg) VALUES (?,?) ON CONFLICT(date) DO UPDATE SET kg=excluded.kg",
                      (day, kg))
-    return jsonify(ok=True), 201
+        latest = conn.execute("SELECT kg FROM weights ORDER BY date DESC LIMIT 1").fetchone()
+        if latest:
+            set_setting(conn, "profile_weight", latest["kg"])
+    return jsonify(ok=True, date=day, kg=kg), 201
 
 
 @app.delete("/api/weights/<day>")
@@ -936,9 +952,21 @@ def export_csv():
 
 @app.get("/api/export/pdf")
 def export_pdf():
-    """Genera y descarga un informe nutricional completo en PDF con fpdf2."""
+    """Genera y descarga un informe nutricional completo en PDF con fpdf2 (por días o por semanas)."""
     target_date = request.args.get("date") or date.today().isoformat()
     valid_date(target_date)
+    weeks_param = request.args.get("weeks")
+    if weeks_param or request.args.get("mode") == "weeks":
+        try:
+            weeks = max(1, min(int(weeks_param or 12), 104))
+        except ValueError:
+            weeks = 12
+        with get_conn() as conn:
+            pdf_bytes = pdf_report.generate_weekly_pdf(conn, target_date=target_date, weeks_count=weeks)
+        resp = Response(pdf_bytes, mimetype="application/pdf")
+        resp.headers["Content-Disposition"] = f'attachment; filename="informe_semanal_{weeks}semanas_{target_date}.pdf"'
+        return resp
+
     try:
         days = max(1, min(int(request.args.get("days", 30)), 365))
     except ValueError:

@@ -357,8 +357,32 @@ class ApiTest(unittest.TestCase):
         self.assertTrue(clean_bytes.startswith(b"SQLite format 3"))
         self.assertNotIn(b"AIzaSySecretKey9999", clean_bytes)
 
+    def test_weekly_history_and_pdf_12_52(self):
+        self.add(300, day="2026-10-14")
+        self.c.post("/api/weights", json={"date": "2026-10-01", "kg": 119.5})
+        self.c.post("/api/weights", json={"date": "2026-10-14", "kg": 118.2})
+
+        r12 = self.c.get("/api/history/weeks?weeks=12&date=2026-10-14").get_json()
+        self.assertEqual(r12["weeks_count"], 12)
+        self.assertEqual(len(r12["weeks"]), 12)
+        self.assertEqual(r12["total_logged_days"], 1)
+        self.assertAlmostEqual(r12["weight_change"], -1.3, places=1)
+
+        r52 = self.c.get("/api/history/weeks?weeks=52&date=2026-10-14").get_json()
+        self.assertEqual(r52["weeks_count"], 52)
+        self.assertEqual(len(r52["weeks"]), 52)
+
+        pdf12 = self.c.get("/api/export/pdf?mode=weeks&weeks=12&date=2026-10-14")
+        self.assertEqual(pdf12.status_code, 200)
+        self.assertTrue(pdf12.data.startswith(b"%PDF"))
+
+        pdf52 = self.c.get("/api/export/pdf?mode=weeks&weeks=52&date=2026-10-14")
+        self.assertEqual(pdf52.status_code, 200)
+        self.assertTrue(pdf52.data.startswith(b"%PDF"))
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
