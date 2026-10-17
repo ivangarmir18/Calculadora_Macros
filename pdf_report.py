@@ -7,6 +7,8 @@ import io
 from datetime import date, datetime, timedelta
 from fpdf import FPDF, XPos, YPos
 
+import gemini
+
 
 class MacroPDF(FPDF):
     def __init__(self, title_text="Informe Nutricional - Calculadora de Macros"):
@@ -490,6 +492,162 @@ def generate_macro_pdf(conn, target_date=None, days_range=30):
     pdf.cell(col_w[6], 6, f"{avg_f:.1f}", border=1, fill=True, align="R")
     pdf.cell(col_w[7] + col_w[8], 6, f"Adherencia: {adherence_pct:.0f}%", border=1, fill=True, align="C")
     pdf.ln(8)
+
+    pdf.ln(5)
+
+    # ----------------------------------------------------
+    # SECCIÓN 5: Análisis de Correlación Comidas-Peso & Asesoría IA
+    # ----------------------------------------------------
+    # Extraer pesos registrados y calcular variación
+    weights_logged = [(d["date"], d["weight"]) for d in period_days if d["weight"] is not None]
+    w_start = weights_logged[0][1] if weights_logged else None
+    w_end = weights_logged[-1][1] if weights_logged else None
+    w_diff = (w_end - w_start) if (w_start is not None and w_end is not None) else None
+    w_diff_str = f"{w_diff:+.1f} kg" if w_diff is not None else "Sin variación registrada"
+
+    avg_deficit_val = tdee - avg_kcal if n_logged > 0 else 0.0
+
+    # Construir resumen de días clave para el prompt
+    days_summary_lines = []
+    for d in period_days[-14:]:  # últimos 14 días para mayor precisión
+        status = f"{d['kcal']:.0f} kcal (P:{d['protein']:.0f}g, C:{d['carbs']:.0f}g, F:{d['fat']:.0f}g)" if d["has_data"] else "Sin registro"
+        w_part = f" | Peso: {d['weight']:.1f} kg" if d["weight"] else ""
+        days_summary_lines.append(f"- {d['date']}: {status}{w_part}")
+    days_summary_text = "\n".join(days_summary_lines)
+
+    context_ai = {
+        "days_range": days_range,
+        "tdee": round(tdee),
+        "goal_kcal": round(goal_kcal),
+        "planned_deficit": round(planned_deficit),
+        "goal_p": round(goal_p),
+        "goal_c": round(goal_c),
+        "goal_f": round(goal_f),
+        "weight_start": f"{w_start:.1f}" if w_start else "-",
+        "weight_end": f"{w_end:.1f}" if w_end else "-",
+        "weight_diff_str": w_diff_str,
+        "n_logged": n_logged,
+        "adherence_pct": round(adherence_pct),
+        "avg_kcal": round(avg_kcal),
+        "avg_deficit": round(avg_deficit_val),
+        "total_deficit": round(total_deficit),
+        "fat_loss_est_kg": f"{fat_loss_est_kg:.2f}",
+        "days_summary": days_summary_text,
+    }
+
+    # Intentar obtener análisis con Gemini si la API key está disponible
+    ai_analysis = None
+    gemini_key, _ = gemini.get_gemini_api_key(conn)
+    gemini_model, _ = gemini.get_gemini_model(conn)
+    if gemini_key:
+        try:
+            ai_analysis = gemini.analyze_process_with_gemini(gemini_key, context_ai, preferred_model=gemini_model)
+        except Exception:
+            ai_analysis = None
+
+    # Fallback estadístico determinista si no hay Gemini o falló la conexión
+    if not ai_analysis or not isinstance(ai_analysis, dict):
+        if w_diff is not None and w_diff < 0:
+            v_title = "Evolución favorable con tendencia de pérdida de peso"
+            v_body = (
+                f"Durante los últimos {days_range} días has registrado un déficit acumulado de -{total_deficit:,.0f} kcal "
+                f"con una variación de peso de {w_diff_str} (de {w_start:.1f} kg a {w_end:.1f} kg). "
+                f"El ritmo de descenso coincide con el déficit energético mantenido. Las posibles subidas o bajadas puntuales entre días "
+                f"suelen deberse a fluctuaciones normales de agua corporal, retención de sodio o repleción de glucógeno muscular."
+            ).replace(",", ".")
+            v_tips = [
+                f"Mantén tu consumo proteico en torno a {goal_p:.0f}g diarios para preservar masa muscular durante el déficit.",
+                "Pésate siempre en las mismas condiciones (en ayunas al despertar y tras orinar) para reducir ruido en la báscula.",
+                "La constancia en los registros de fines de semana es clave para que el déficit real sea predecible."
+            ]
+        elif w_diff is not None and w_diff > 0:
+            v_title = "Fase de fluctuación temporal o ligero superávit"
+            v_body = (
+                f"El peso registrado ha variado en {w_diff_str} (de {w_start:.1f} kg a {w_end:.1f} kg) con un promedio de "
+                f"{avg_kcal:.0f} kcal/día frente a un objetivo de {goal_kcal:.0f} kcal. Si has entrenado con fuerza o aumentado "
+                f"hidratos de carbono, gran parte del incremento puede ser agua intramuscular (1g glucógeno retiene ~3g de agua)."
+            )
+            v_tips = [
+                f"Revisa condimentos y aliños como aceite de oliva (1 cucharada sopera aporta ~120 kcal de grasa).",
+                f"Intenta registrar al menos el 80% de los días para tener una lectura precisa del balance energético.",
+                "Evalúa la tendencia a 3-4 semanas en lugar de variaciones de 24-48 horas."
+            ]
+        else:
+            v_title = "Fase de mantenimiento o consolidación del peso"
+            v_body = (
+                f"En este periodo de {days_range} días has mantenido un promedio de {avg_kcal:.0f} kcal/día "
+                f"frente a un TDEE de {tdee:.0f} kcal. El peso se muestra estable. "
+                f"Para activar o acelerar la pérdida de grasa de forma controlada, sostener un déficit diario de 500-800 kcal "
+                f"permite reducir aproximadamente 0.5 a 0.8 kg de grasa por semana con máxima retención de masa magra."
+            )
+            v_tips = [
+                f"Asegura tu ingesta proteica diaria ({goal_p:.0f}g) para mantener la saciedad alta y tu masa magra protegida.",
+                "Apunta los pesos con frecuencia regular (al menos 3-4 días por semana) para detectar la tendencia real.",
+                "Aprovecha el asistente por voz para registrar ensaladas y platos combinados sin fricción."
+            ]
+        ai_analysis = {
+            "verdict": v_title,
+            "analysis": v_body,
+            "tips": v_tips
+        }
+
+    # Salto de página si queda poco espacio para la sección de análisis
+    if pdf.get_y() > 210:
+        pdf.add_page()
+
+    sec_y = pdf.get_y()
+    pdf.set_font("helvetica", "B", 11)
+    pdf.set_text_color(15, 23, 42)
+    ai_badge_text = " · Gemini AI Asesor Nutricional" if gemini_key else " · Análisis Fisiológico Clínico"
+    pdf.cell(0, 5, f"Análisis de Correlación: Comidas vs. Peso Corporal{ai_badge_text}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.ln(1)
+
+    box_start_y = pdf.get_y()
+
+    # Caja contenedora del análisis
+    pdf.set_fill_color(248, 250, 252)
+    pdf.set_draw_color(203, 213, 225)
+
+    # 1. Tarjeta resumen métricas peso vs comidas (3 mini-columnas)
+    pdf.set_font("helvetica", "B", 8)
+    pdf.set_text_color(16, 185, 129)
+    verdict_text = str(ai_analysis.get("verdict", "Evaluación del Proceso")).strip()
+    pdf.multi_cell(190, 5, f"Dictamen Clínico: {verdict_text}", border=0, align="L")
+    pdf.ln(1)
+
+    pdf.set_font("helvetica", "", 8)
+    pdf.set_text_color(51, 65, 85)
+    metric_summary = (
+        f"- Peso: {context_ai['weight_start']} kg -> {context_ai['weight_end']} kg ({w_diff_str})   |   "
+        f"- Déficit Real: -{context_ai['avg_deficit']} kcal/día   |   "
+        f"- Pérdida Grasa Est.: -{context_ai['fat_loss_est_kg']} kg teóricos"
+    )
+    pdf.cell(190, 5, metric_summary, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.ln(1)
+
+    # 2. Párrafo explicativo de la correlación comidas-peso
+    pdf.set_font("helvetica", "", 8)
+    pdf.set_text_color(30, 41, 59)
+    analysis_text = str(ai_analysis.get("analysis", "")).strip()
+    pdf.multi_cell(190, 4.3, analysis_text, border=0, align="J")
+    pdf.ln(2)
+
+    # 3. Puntos clave y consejos accionables
+    tips = ai_analysis.get("tips", [])
+    if isinstance(tips, list) and tips:
+        pdf.set_font("helvetica", "B", 8)
+        pdf.set_text_color(16, 185, 129)
+        pdf.cell(0, 4.5, "Recomendaciones Clínicas y Consejos Accionables:", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+        pdf.set_font("helvetica", "", 7.8)
+        pdf.set_text_color(51, 65, 85)
+        for t_idx, tip in enumerate(tips[:3], 1):
+            tip_clean = str(tip).strip().replace("\n", " ")
+            pdf.cell(5, 4.2, f"{t_idx}.", align="R")
+            pdf.multi_cell(185, 4.2, f" {tip_clean}", border=0, align="L")
+            pdf.ln(0.5)
+
+    pdf.ln(4)
 
     # Generar bytes de salida
     buf = io.BytesIO()

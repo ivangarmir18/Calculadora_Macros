@@ -271,3 +271,110 @@ def parse_with_gemini(api_key, text="", audio_bytes=None, audio_mime="audio/webm
     raise GeminiError(last_error or "No se pudo conectar con Gemini.")
 
 
+REPORT_ANALYSIS_INSTRUCTION = """Eres un dietista-nutricionista deportivo y fisiólogo de élite.
+Tu misión es redactar un análisis clínico y motivador sobre la evolución de un usuario, correlacionando sus comidas/calorías registradas con sus variaciones de peso corporal a lo largo de los días.
+
+PAUTAS CRÍTICAS:
+1. Análisis de correlación: Explica si el déficit calórico real coincide con la variación de peso corporal o si intervienen factores como retención de líquidos, glucógeno, variaciones de sodio o digestiones pesadas.
+2. Evalúa si el proceso tiene sentido: Da una conclusión clara y profesional (ej. "El proceso tiene total sentido metabólico", "Ritmo óptimo de pérdida grasa", etc.).
+3. Consejos accionables: Aporta 2-3 recomendaciones concisas y personalizadas (ej. reparto de proteína, hidratación, consistencia en días sin registro).
+4. Tono: Riguroso, motivador, empático y directo. En español.
+5. Formato: Devuelve ÚNICAMENTE un objeto JSON válido con los campos "verdict", "analysis", "tips".
+"""
+
+
+def analyze_process_with_gemini(api_key, context_data, preferred_model=None):
+    """Genera un análisis nutricional y de correlación peso-comidas usando Gemini."""
+    if not api_key:
+        raise GeminiError("No se ha configurado la clave de la API de Gemini.")
+
+    prompt = f"""Analiza la siguiente evolución del usuario durante los últimos {context_data.get('days_range')} días:
+
+DATOS BIOMÉTRICOS DEL USUARIO:
+- TDEE (Gasto Energético Total): {context_data.get('tdee')} kcal/día
+- Objetivo calórico diario: {context_data.get('goal_kcal')} kcal/día (Déficit planificado: -{context_data.get('planned_deficit')} kcal)
+- Proteína objetivo: {context_data.get('goal_p')}g | Carbs: {context_data.get('goal_c')}g | Grasa: {context_data.get('goal_f')}g
+- Peso inicial registrado: {context_data.get('weight_start')} kg
+- Peso final registrado: {context_data.get('weight_end')} kg
+- Variación total de peso: {context_data.get('weight_diff_str')}
+
+REGISTRO Y ADHERENCIA:
+- Días con comida registrada: {context_data.get('n_logged')} de {context_data.get('days_range')} días ({context_data.get('adherence_pct')}%)
+- Calorías promedio diarias reales: {context_data.get('avg_kcal')} kcal (vs objetivo {context_data.get('goal_kcal')} kcal)
+- Déficit promedio diario real vs TDEE: -{context_data.get('avg_deficit')} kcal/día
+- Déficit acumulado total del periodo: -{context_data.get('total_deficit')} kcal
+- Pérdida estimada teórica de grasa pura (base 7700 kcal/kg): ~ {context_data.get('fat_loss_est_kg')} kg
+
+DETALLE DE DÍAS CLAVE CON COMIDAS Y PESO:
+{context_data.get('days_summary')}
+
+Devuelve un JSON con:
+{{
+  "verdict": "Titular o conclusión breve (1 frase)",
+  "analysis": "Párrafo conciso (4-6 líneas) analizando la correlación entre las calorías/macros ingeridas y las variaciones de peso (explicando posibles fluctuaciones de agua/glucógeno vs grasa).",
+  "tips": [
+    "Consejo práctico 1",
+    "Consejo práctico 2",
+    "Consejo práctico 3"
+  ]
+}}
+"""
+
+    payload = {
+        "systemInstruction": {
+            "parts": [{"text": REPORT_ANALYSIS_INSTRUCTION}]
+        },
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": prompt}],
+            }
+        ],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "temperature": 0.3,
+        }
+    }
+
+    last_error = None
+    models_to_try = get_models_list(preferred_model)
+    for model_name in models_to_try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={urllib.parse.quote(api_key)}"
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=40) as resp:
+                data = json.load(resp)
+                candidates = data.get("candidates", [])
+                if not candidates:
+                    raise GeminiError("Gemini no devolvió respuesta.")
+                content_parts = candidates[0].get("content", {}).get("parts", [])
+                if not content_parts:
+                    raise GeminiError("Respuesta vacía de Gemini.")
+                raw_json = content_parts[0].get("text", "")
+                raw_json = re.sub(r"^```(?:json)?\s*", "", raw_json.strip())
+                raw_json = re.sub(r"\s*```$", "", raw_json.strip())
+                return json.loads(raw_json)
+        except urllib.error.HTTPError as e:
+            if e.code in (404, 429):
+                continue
+            err_body = e.read().decode("utf-8", errors="ignore")
+            try:
+                err_json = json.loads(err_body)
+                msg = err_json.get("error", {}).get("message", e.reason)
+            except Exception:
+                msg = e.reason
+            last_error = f"Error en {model_name}: {msg}"
+            continue
+        except Exception as e:
+            last_error = str(e)
+            continue
+
+    raise GeminiError(last_error or "No se pudo conectar con Gemini para el informe.")
+
+
+
