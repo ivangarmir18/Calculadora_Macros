@@ -397,57 +397,59 @@ video.scan { width: 100%; border-radius: 16px; background: #000; max-height: 280
 
 
 
-/* ===== Gráficas Interactivas y Tooltip Flotante ===== */
+/* ===== Barra Limpia de Peso e Interactividad ===== */
 .chart-container {
   position: relative;
   width: 100%;
 }
-.chart-hover-pill {
-  position: absolute;
-  top: 10px;
-  left: 50%;
-  transform: translateX(-50%);
-  background: rgba(18, 24, 38, 0.95);
-  backdrop-filter: blur(8px);
-  border: 1px solid var(--accent);
-  color: #fff;
-  padding: 6px 12px;
-  border-radius: 999px;
-  font-size: 0.8rem;
-  box-shadow: 0 4px 16px rgba(0,0,0,0.35);
-  pointer-events: none;
-  z-index: 20;
+.chart-weight-bar {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 8px;
-  animation: fadeInDown 0.18s ease-out;
+  font-size: 0.88rem;
+  margin-bottom: 8px;
+  padding: 6px 12px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 7%, var(--card));
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--line));
 }
-@keyframes fadeInDown {
-  from { opacity: 0; transform: translate(-50%, -6px); }
-  to { opacity: 1; transform: translate(-50%, 0); }
+.chart-weight-bar .cwb-date {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+.chart-weight-bar .cwb-dot {
+  color: var(--muted);
+  opacity: 0.5;
+}
+.chart-weight-bar .cwb-kg {
+  color: var(--text);
+  font-size: 0.96rem;
+  font-weight: 700;
+}
+.chart-weight-bar .cwb-diff {
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+.chart-weight-bar .cwb-diff.good {
+  color: var(--accent);
+}
+.chart-weight-bar .cwb-diff.warn {
+  color: var(--danger);
 }
 .chart-point-g {
   cursor: pointer;
   outline: none;
 }
-.pulse-ring {
-  animation: pulseAnim 2s infinite ease-out;
-  transform-origin: center;
-}
-@keyframes pulseAnim {
-  0% { transform: scale(1); opacity: 0.8; }
-  70% { transform: scale(2.4); opacity: 0; }
-  100% { transform: scale(2.4); opacity: 0; }
+.chart-dot {
+  transition: r 0.12s ease, fill 0.12s ease;
 }
 .chart-point-g:hover .chart-dot,
 .chart-point-g.active .chart-dot {
-  filter: drop-shadow(0 0 6px var(--accent));
-  transform: scale(1.35);
-  transition: transform 0.15s ease-out;
-}
-.chart-guide-line {
-  pointer-events: none;
-  transition: opacity 0.15s ease;
+  r: 5.2;
+  fill: #fff;
+  stroke: var(--accent);
+  stroke-width: 2.2;
 }
 
 /* ===== Selector de Periodo Flexible ===== */

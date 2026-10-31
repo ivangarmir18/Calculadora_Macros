@@ -4,7 +4,6 @@
 function ringChart(value, goal, { size = 132, stroke = 12, color = "var(--kcal)" } = {}) {
   const r = (size - stroke) / 2, c = 2 * Math.PI * r;
   const pct = goal > 0 ? Math.min(value / goal, 1) : 0;
-  // Tolerancia del 10%: solo se considera "over" si se supera el 110% del objetivo
   const over = goal > 0 && value > goal * 1.10;
   return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" class="ring">
     <circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="var(--track)" stroke-width="${stroke}"/>
@@ -47,10 +46,10 @@ function barChart(days, goal) {
     <text x="${W - 2}" y="${y(goal) - 3}" text-anchor="end" class="goal-l">objetivo ${Math.round(goal)}</text>${labels}</svg>`;
 }
 
-/** Línea de peso interactiva con animaciones de baremo, puntos ampliables y tooltip flotante. points: [{date,kg}] ascendente. */
+/** Línea de peso limpia, ultra rápida y sin sobrecargas. points: [{date,kg}] ascendente. */
 function lineChart(points) {
   const W = 340, H = 145, padL = 32, padR = 12, padT = 16, padB = 20;
-  if (!points || points.length < 2) return `<div class="empty small">Apunta al menos 2 pesos para ver la gráfica interactiva</div>`;
+  if (!points || points.length < 2) return `<div class="empty small">Apunta al menos 2 pesos para ver la gráfica</div>`;
   const ts = points.map((p) => new Date(p.date).getTime());
   const t0 = Math.min(...ts), t1 = Math.max(...ts);
   const ks = points.map((p) => p.kg);
@@ -62,17 +61,16 @@ function lineChart(points) {
   const path = pts.map((p, i) => `${i ? "L" : "M"}${p[0].toFixed(1)} ${p[1].toFixed(1)}`).join(" ");
   const area = `${path} L${pts[pts.length - 1][0]} ${H - padB} L${pts[0][0]} ${H - padB} Z`;
   const ticks = [hi - pad, (hi + lo) / 2, lo + pad].map((k) => `<line x1="${padL}" x2="${W - padR}" y1="${y(k)}" y2="${y(k)}" stroke="var(--line)" stroke-width="1"/><text x="${padL - 4}" y="${y(k) + 3}" text-anchor="end">${k.toFixed(1)}</text>`).join("");
-  
+
   const cid = "lc_" + Math.random().toString(36).slice(2, 8);
   const dots = pts.map((p, i) => {
     const pt = points[i];
     const prev = i > 0 ? points[i - 1].kg : null;
     const diff = prev !== null ? (pt.kg - prev) : null;
     const diffStr = diff !== null ? (diff > 0 ? `+${diff.toFixed(1)}` : diff.toFixed(1)) + " kg" : "";
-    return `<g class="chart-point-g" data-date="${pt.date}" data-kg="${pt.kg}" data-diff="${diffStr}" data-x="${p[0].toFixed(1)}" data-y="${p[1].toFixed(1)}" tabindex="0">
-      <circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="14" fill="transparent" class="hit-circle"/>
-      <circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="6" class="pulse-ring"/>
-      <circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="3.8" class="chart-dot"/>
+    return `<g class="chart-point-g" data-date="${pt.date}" data-kg="${pt.kg}" data-diff="${diffStr}" data-x="${p[0].toFixed(1)}" onmouseenter="chartPointHover(this)" onmouseleave="chartPointLeave(this)" onclick="chartPointClick(this)">
+      <circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="9" fill="transparent" style="cursor:pointer;"/>
+      <circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="3" fill="var(--accent)" class="chart-dot"/>
       <title>${pt.date}: ${pt.kg} kg ${diffStr ? '(' + diffStr + ')' : ''}</title>
     </g>`;
   }).join("");
@@ -83,22 +81,24 @@ function lineChart(points) {
   const totalChange = (lastPt.kg - firstPt.kg);
   const changeStr = (totalChange > 0 ? "+" : "") + totalChange.toFixed(1) + " kg";
 
-  return `<div class="chart-container" id="${cid}_wrap">
-    <div class="chart-hover-pill" id="${cid}_pill">
-      <span class="pill-title">${lastPt.date}: <b>${lastPt.kg} kg</b></span>
-      <span class="pill-diff ${totalChange <= 0 ? 'good' : 'warn'}">${changeStr} en periodo</span>
+  return `<div class="chart-container" id="${cid}_wrap" data-last-date="${lastPt.date}" data-last-kg="${lastPt.kg}" data-last-diff="${changeStr} en periodo" data-last-good="${totalChange <= 0 ? '1' : '0'}">
+    <div class="chart-weight-bar" id="${cid}_bar">
+      <span class="cwb-date">${lastPt.date}</span>
+      <span class="cwb-dot">·</span>
+      <strong class="cwb-kg">${lastPt.kg} kg</strong>
+      <span class="cwb-diff ${totalChange <= 0 ? 'good' : 'warn'}">(${changeStr} en periodo)</span>
     </div>
     <svg viewBox="0 0 ${W} ${H}" class="chart weight-chart" id="${cid}_svg">
       <defs>
         <linearGradient id="${cid}_wg" x1="0" x2="0" y1="0" y2="1">
-          <stop offset="0" stop-color="var(--accent)" stop-opacity=".32"/>
+          <stop offset="0" stop-color="var(--accent)" stop-opacity=".25"/>
           <stop offset="1" stop-color="var(--accent)" stop-opacity="0"/>
         </linearGradient>
       </defs>
       ${ticks}
       <path d="${area}" fill="url(#${cid}_wg)"/>
-      <path d="${path}" fill="none" stroke="var(--accent)" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" class="weight-line"/>
-      <line id="${cid}_guide" x1="0" x2="0" y1="${padT}" y2="${H - padB}" class="chart-guide-line hidden"/>
+      <path d="${path}" fill="none" stroke="var(--accent)" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>
+      <line id="${cid}_guide" x1="0" x2="0" y1="${padT}" y2="${H - padB}" stroke="var(--muted)" stroke-dasharray="3 3" stroke-width="1" opacity="0" style="pointer-events:none;"/>
       ${dots}
       <text x="${padL}" y="${H - 3}">${d0.slice(8)}/${d0.slice(5, 7)}</text>
       <text x="${W - padR}" y="${H - 3}" text-anchor="end">${d1.slice(8)}/${d1.slice(5, 7)}</text>
@@ -106,44 +106,44 @@ function lineChart(points) {
   </div>`;
 }
 
-// Delegación global para animaciones y tooltips interactivos en gráficas de peso
-function handleChartPointInteraction(e) {
-  const g = e.target.closest(".chart-point-g");
-  if (!g) return;
-  const wrap = g.closest(".chart-container");
+// Handlers rápidos directos para puntos del gráfico
+function chartPointHover(el) {
+  const wrap = el.closest(".chart-container");
   if (!wrap) return;
+  const bar = wrap.querySelector(".chart-weight-bar");
+  const date = el.dataset.date;
+  const kg = el.dataset.kg;
+  const diff = el.dataset.diff;
+  const x = el.dataset.x;
 
-  const date = g.dataset.date;
-  const kg = g.dataset.kg;
-  const diff = g.dataset.diff;
-  const x = g.dataset.x;
-
-  wrap.querySelectorAll(".chart-point-g").forEach((el) => el.classList.remove("active"));
-  g.classList.add("active");
-
-  const pill = wrap.querySelector(".chart-hover-pill");
-  if (pill) {
-    pill.classList.remove("hidden");
-    const diffSpan = diff ? `<span class="pill-diff ${diff.startsWith('-') ? 'good' : 'warn'}">(${diff})</span>` : "";
-    pill.innerHTML = `<span class="pill-title">📅 ${date}: <b>${kg} kg</b></span> ${diffSpan}`;
+  el.classList.add("active");
+  if (bar) {
+    const isGood = !diff || diff.startsWith("-");
+    bar.innerHTML = `<span class="cwb-date">${date}</span> <span class="cwb-dot">·</span> <strong class="cwb-kg">${kg} kg</strong> ${diff ? `<span class="cwb-diff ${isGood ? 'good' : 'warn'}">(${diff})</span>` : ''}`;
   }
-
-  const guide = wrap.querySelector(".chart-guide-line");
+  const guide = wrap.querySelector("line[id$='_guide']");
   if (guide && x) {
     guide.setAttribute("x1", x);
     guide.setAttribute("x2", x);
-    guide.classList.remove("hidden");
-  }
-
-  // Si se hizo click y está el campo de peso de hoy, ayudar a seleccionarlo
-  if (e.type === "click") {
-    const inputW = document.getElementById("wk") || document.getElementById("w_custom_kg");
-    if (inputW && !inputW.value) {
-      inputW.value = kg;
-    }
+    guide.setAttribute("opacity", "0.6");
   }
 }
 
-document.addEventListener("mouseover", handleChartPointInteraction);
-document.addEventListener("click", handleChartPointInteraction);
-document.addEventListener("touchstart", handleChartPointInteraction, { passive: true });
+function chartPointLeave(el) {
+  const wrap = el.closest(".chart-container");
+  if (!wrap) return;
+  el.classList.remove("active");
+  const bar = wrap.querySelector(".chart-weight-bar");
+  if (bar && wrap.dataset.lastDate) {
+    const isGood = wrap.dataset.lastGood === "1";
+    bar.innerHTML = `<span class="cwb-date">${wrap.dataset.lastDate}</span> <span class="cwb-dot">·</span> <strong class="cwb-kg">${wrap.dataset.lastKg} kg</strong> <span class="cwb-diff ${isGood ? 'good' : 'warn'}">(${wrap.dataset.lastDiff})</span>`;
+  }
+  const guide = wrap.querySelector("line[id$='_guide']");
+  if (guide) guide.setAttribute("opacity", "0");
+}
+
+function chartPointClick(el) {
+  const kg = el.dataset.kg;
+  const inputW = document.getElementById("wk") || document.getElementById("w_custom_kg");
+  if (inputW) inputW.value = kg;
+}
