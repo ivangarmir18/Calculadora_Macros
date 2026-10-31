@@ -395,3 +395,163 @@ video.scan { width: 100%; border-radius: 16px; background: #000; max-height: 280
   .card, .item { box-shadow: none !important; border: 1px solid #ccc !important; }
 }
 
+
+
+/* ===== Gráficas Interactivas y Tooltip Flotante ===== */
+.chart-container {
+  position: relative;
+  width: 100%;
+}
+.chart-hover-pill {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(18, 24, 38, 0.95);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--accent);
+  color: #fff;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.35);
+  pointer-events: none;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  animation: fadeInDown 0.18s ease-out;
+}
+@keyframes fadeInDown {
+  from { opacity: 0; transform: translate(-50%, -6px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+.chart-point-g {
+  cursor: pointer;
+  outline: none;
+}
+.pulse-ring {
+  animation: pulseAnim 2s infinite ease-out;
+  transform-origin: center;
+}
+@keyframes pulseAnim {
+  0% { transform: scale(1); opacity: 0.8; }
+  70% { transform: scale(2.4); opacity: 0; }
+  100% { transform: scale(2.4); opacity: 0; }
+}
+.chart-point-g:hover .chart-dot,
+.chart-point-g.active .chart-dot {
+  filter: drop-shadow(0 0 6px var(--accent));
+  transform: scale(1.35);
+  transition: transform 0.15s ease-out;
+}
+.chart-guide-line {
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+}
+
+/* ===== Selector de Periodo Flexible ===== */
+.range-picker-card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 12px 14px;
+  margin-bottom: 14px;
+}
+.range-picker-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+.range-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+.range-field input[type="date"] {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-size: 0.85rem;
+}
+.view-switch {
+  display: flex;
+  background: var(--bg);
+  padding: 3px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  margin-bottom: 14px;
+}
+.view-switch-btn {
+  flex: 1;
+  text-align: center;
+  padding: 8px 12px;
+  font-size: 0.82rem;
+  font-weight: 700;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.view-switch-btn.active {
+  background: var(--card);
+  color: var(--text);
+  box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+}
+
+/* ===== Desglose Modo Excel ===== */
+.excel-box {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 14px;
+  margin-bottom: 14px;
+  overflow-x: auto;
+}
+.excel-day-hdr {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 2px solid var(--line);
+  margin-bottom: 8px;
+}
+.excel-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+  margin-bottom: 14px;
+}
+.excel-table th {
+  text-align: left;
+  padding: 6px 8px;
+  background: var(--bg);
+  color: var(--muted);
+  font-weight: 700;
+  border-bottom: 1px solid var(--line);
+}
+.excel-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 40%, transparent);
+}
+.excel-table tr.meal-row td {
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+  font-weight: 700;
+  color: var(--accent);
+  padding-top: 8px;
+}
+.excel-table tr.total-row td {
+  font-weight: 800;
+  border-top: 1px solid var(--line);
+  border-bottom: 2px solid var(--line);
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg));
+}

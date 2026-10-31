@@ -212,7 +212,7 @@
         <div class="meta" id="repSub">Calculadora de Macros · Registro de Ingesta y Balance Energético</div>
       </div>
       <div style="text-align:right;">
-        <span class="badge badge-deficit" id="repBadge">Déficit: -1200 kcal/día</span>
+        <span class="badge badge-deficit" id="repBadge">Déficit: -850 kcal/día</span>
         <div class="meta" style="margin-top:4px;" id="repGenDate"></div>
       </div>
     </div>
@@ -220,9 +220,9 @@
     <div class="section-title">1. Parámetros Biométricos y Objetivos Base del Usuario</div>
     <div class="box">
       <div class="grid2" style="margin-bottom:8px;">
-        <div><b>Gasto Calórico Diario (TDEE):</b> <span id="bioTdee">3350</span> kcal</div>
+        <div><b>Gasto Calórico Diario (TDEE):</b> <span id="bioTdee">3000</span> kcal</div>
         <div><b>Objetivo Calórico Diario:</b> <span id="bioGoal">2150</span> kcal</div>
-        <div><b>Déficit Calórico Planificado:</b> <span id="bioDeficit" style="color:var(--accent);font-weight:700;">-1200</span> kcal/día (~1.08 kg grasa/semana)</div>
+        <div><b>Déficit Calórico Planificado:</b> <span id="bioDeficit" style="color:var(--accent);font-weight:700;">-850</span> kcal/día (~1.08 kg grasa/semana)</div>
         <div><b>Peso Corporal:</b> <span id="bioWeight">119.0</span> kg &nbsp;|&nbsp; <b>Masa Magra (LBM):</b> <span id="bioLbm">85.5</span> kg</div>
       </div>
       <div style="font-size:0.88rem;color:var(--muted);border-top:1px solid var(--line);padding-top:8px;">
@@ -242,8 +242,8 @@
       </div>
       <div class="stat-card">
         <div class="lbl">Déficit Real vs TDEE</div>
-        <div class="val" style="color:var(--accent)" id="dayDeficit">-3350</div>
-        <div class="sub" id="dayTdeeSub">TDEE: 3350 kcal</div>
+        <div class="val" style="color:var(--accent)" id="dayDeficit">-3000</div>
+        <div class="sub" id="dayTdeeSub">TDEE: 3000 kcal</div>
       </div>
       <div class="stat-card">
         <div class="lbl">Proteína Total</div>
@@ -324,7 +324,7 @@
         const p = settingsData.profile || {};
         const t = dayData.totals || {};
 
-        const tdee = parseFloat(p.tdee || "3350");
+        const tdee = parseFloat(p.tdee || "3000");
         const goalKcal = parseFloat(g.kcal || "2150");
         const weight = parseFloat(p.weight || "119");
         const lbm = parseFloat(p.lbm || "85.5");

@@ -19,7 +19,7 @@ import threading
 import time
 import uuid
 import webbrowser
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from flask import Flask, Response, abort, jsonify, make_response, request, send_from_directory
@@ -259,7 +259,8 @@ def get_day(day):
     github_sync.maybe_periodic_pull()
     with get_conn() as conn:
         entries = rows(conn.execute("SELECT * FROM entries WHERE date=? ORDER BY time, id", (day,)))
-        return jsonify(date=day, entries=entries, totals=totals(entries), goals=get_goals(conn))
+        tdee = float(get_setting(conn, "profile_tdee", "3000"))
+        return jsonify(date=day, entries=entries, totals=totals(entries), goals=get_goals(conn), tdee=tdee)
 
 
 # ----------------------------------------------------------------- entradas
@@ -385,20 +386,147 @@ def delete_entry(eid):
 # ----------------------------------------------------------------- histórico
 @app.get("/api/history")
 def history():
+    start_date = request.args.get("start_date") or request.args.get("from")
+    end_date = request.args.get("end_date") or request.args.get("to")
+    ref_date = request.args.get("date")
     try:
         days = max(1, min(int(request.args.get("days", 30)), 365))
     except ValueError:
         abort(400, "days no válido")
     with get_conn() as conn:
-        data = rows(conn.execute(
-            "SELECT date, ROUND(SUM(kcal),1) kcal, ROUND(SUM(protein),1) protein, "
-            "ROUND(SUM(carbs),1) carbs, ROUND(SUM(fat),1) fat, COUNT(*) n "
-            "FROM entries WHERE date >= date('now','localtime', ?) "
-            "GROUP BY date ORDER BY date DESC", (f"-{days - 1} days",)))
-        # El promedio solo cuenta los días con registros (un día sin apuntar no es un día de 0 kcal).
+        tdee = float(get_setting(conn, "profile_tdee", "3000"))
+        if start_date and end_date:
+            start = valid_date(start_date)
+            end = valid_date(end_date)
+            if start > end:
+                start, end = end, start
+            sql = ("SELECT date, ROUND(SUM(kcal),1) kcal, ROUND(SUM(protein),1) protein, "
+                   "ROUND(SUM(carbs),1) carbs, ROUND(SUM(fat),1) fat, COUNT(*) n "
+                   "FROM entries WHERE date >= ? AND date <= ? "
+                   "GROUP BY date ORDER BY date DESC")
+            params = (start, end)
+        elif ref_date:
+            end = valid_date(ref_date)
+            start = (datetime.strptime(end, "%Y-%m-%d").date() - timedelta(days=days - 1)).isoformat()
+            sql = ("SELECT date, ROUND(SUM(kcal),1) kcal, ROUND(SUM(protein),1) protein, "
+                   "ROUND(SUM(carbs),1) carbs, ROUND(SUM(fat),1) fat, COUNT(*) n "
+                   "FROM entries WHERE date >= ? AND date <= ? "
+                   "GROUP BY date ORDER BY date DESC")
+            params = (start, end)
+        else:
+            sql = ("SELECT date, ROUND(SUM(kcal),1) kcal, ROUND(SUM(protein),1) protein, "
+                   "ROUND(SUM(carbs),1) carbs, ROUND(SUM(fat),1) fat, COUNT(*) n "
+                   "FROM entries WHERE date >= date('now','localtime', ?) "
+                   "GROUP BY date ORDER BY date DESC")
+            params = (f"-{days - 1} days",)
+            start = (date.today() - timedelta(days=days - 1)).isoformat()
+            end = date.today().isoformat()
+
+        data = rows(conn.execute(sql, params))
         avg = {k: round(sum(r[k] for r in data) / len(data), 1) if data else 0
                for k in ("kcal", "protein", "carbs", "fat")}
-        return jsonify(days=data, average=avg, logged_days=len(data), goals=get_goals(conn))
+        return jsonify(
+            days=data,
+            average=avg,
+            logged_days=len(data),
+            goals=get_goals(conn),
+            tdee=tdee,
+            start_date=start,
+            end_date=end,
+        )
+
+
+@app.get("/api/history/meals")
+def history_meals():
+    """Devuelve el desglose detallado de comidas y alimentos en un periodo seleccionado."""
+    start_date = request.args.get("start_date") or request.args.get("from")
+    end_date = request.args.get("end_date") or request.args.get("to")
+    ref_date = request.args.get("date")
+    try:
+        days = max(1, min(int(request.args.get("days", 30)), 365))
+    except ValueError:
+        days = 30
+
+    if start_date and end_date:
+        start = valid_date(start_date)
+        end = valid_date(end_date)
+        if start > end:
+            start, end = end, start
+    elif ref_date:
+        end = valid_date(ref_date)
+        start = (datetime.strptime(end, "%Y-%m-%d").date() - timedelta(days=days - 1)).isoformat()
+    else:
+        end = date.today().isoformat()
+        start = (date.today() - timedelta(days=days - 1)).isoformat()
+
+    with get_conn() as conn:
+        tdee = float(get_setting(conn, "profile_tdee", "3000"))
+        goals = get_goals(conn)
+        entries = rows(conn.execute(
+            "SELECT * FROM entries WHERE date >= ? AND date <= ? ORDER BY date DESC, time, id",
+            (start, end)
+        ))
+        weights = {r["date"]: r["kg"] for r in conn.execute(
+            "SELECT date, kg FROM weights WHERE date >= ? AND date <= ? ORDER BY date",
+            (start, end)
+        ).fetchall()}
+
+        days_map = {}
+        for e in entries:
+            d_str = e["date"]
+            if d_str not in days_map:
+                days_map[d_str] = {
+                    "date": d_str,
+                    "entries": [],
+                    "totals": {"kcal": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0},
+                    "by_meal": {m: [] for m in MEALS},
+                    "weight": weights.get(d_str),
+                }
+            day_obj = days_map[d_str]
+            day_obj["entries"].append(e)
+            day_obj["totals"]["kcal"] += float(e.get("kcal") or 0)
+            day_obj["totals"]["protein"] += float(e.get("protein") or 0)
+            day_obj["totals"]["carbs"] += float(e.get("carbs") or 0)
+            day_obj["totals"]["fat"] += float(e.get("fat") or 0)
+            m_key = e.get("meal") if e.get("meal") in MEALS else "otro"
+            day_obj["by_meal"][m_key].append(e)
+
+        days_list = []
+        for d_str in sorted(days_map.keys(), reverse=True):
+            d_data = days_map[d_str]
+            d_totals = {k: round(v, 1) for k, v in d_data["totals"].items()}
+            deficit = round(tdee - d_totals["kcal"], 1)
+            days_list.append({
+                "date": d_str,
+                "totals": d_totals,
+                "deficit": deficit,
+                "weight": d_data["weight"],
+                "entries": d_data["entries"],
+                "by_meal": {m: d_data["by_meal"][m] for m in MEALS if d_data["by_meal"][m]},
+            })
+
+        total_kcal = sum(d["totals"]["kcal"] for d in days_list)
+        total_p = sum(d["totals"]["protein"] for d in days_list)
+        total_c = sum(d["totals"]["carbs"] for d in days_list)
+        total_f = sum(d["totals"]["fat"] for d in days_list)
+        n_logged = len(days_list)
+        avg = {
+            "kcal": round(total_kcal / n_logged, 1) if n_logged else 0,
+            "protein": round(total_p / n_logged, 1) if n_logged else 0,
+            "carbs": round(total_c / n_logged, 1) if n_logged else 0,
+            "fat": round(total_f / n_logged, 1) if n_logged else 0,
+        }
+
+        return jsonify(
+            start_date=start,
+            end_date=end,
+            logged_days=n_logged,
+            total_entries=len(entries),
+            days=days_list,
+            average=avg,
+            tdee=tdee,
+            goals=goals
+        )
 
 
 @app.get("/api/history/weeks")
@@ -937,26 +1065,46 @@ def export_all():
 
 @app.get("/api/export.csv")
 def export_csv():
+    start_date = request.args.get("start_date") or request.args.get("from")
+    end_date = request.args.get("end_date") or request.args.get("to")
+    days_arg = request.args.get("days")
     buf = io.StringIO()
     w = csv.writer(buf, delimiter=";")  # ';' para que Excel en español lo separe bien
     w.writerow(["fecha", "hora", "comida", "nombre", "gramos", "kcal", "proteina", "hidratos", "grasa"])
     with get_conn() as conn:
-        for e in conn.execute("SELECT * FROM entries ORDER BY date, time, id"):
+        if start_date and end_date:
+            sql = "SELECT * FROM entries WHERE date >= ? AND date <= ? ORDER BY date, time, id"
+            params = (valid_date(start_date), valid_date(end_date))
+        elif days_arg:
+            days = max(1, min(int(days_arg), 365))
+            ref = valid_date(request.args.get("date")) if request.args.get("date") else date.today().isoformat()
+            start = (datetime.strptime(ref, "%Y-%m-%d").date() - timedelta(days=days - 1)).isoformat()
+            sql = "SELECT * FROM entries WHERE date >= ? AND date <= ? ORDER BY date, time, id"
+            params = (start, ref)
+        else:
+            sql = "SELECT * FROM entries ORDER BY date, time, id"
+            params = ()
+        for e in conn.execute(sql, params):
             w.writerow([e["date"], e["time"], e["meal"], e["name"], e["grams"] or "",
                         str(e["kcal"]).replace(".", ","), str(e["protein"]).replace(".", ","),
                         str(e["carbs"]).replace(".", ","), str(e["fat"]).replace(".", ",")])
+    filename = f"macros_{start_date}_a_{end_date}.csv" if (start_date and end_date) else f"macros-{date.today().isoformat()}.csv"
     resp = Response("\ufeff" + buf.getvalue(), mimetype="text/csv; charset=utf-8")
-    resp.headers["Content-Disposition"] = f'attachment; filename="macros-{date.today().isoformat()}.csv"'
+    resp.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
     return resp
 
 
 @app.get("/api/export/pdf")
 def export_pdf():
-    """Genera y descarga un informe nutricional completo en PDF con fpdf2 (por días o por semanas)."""
+    """Genera y descarga un informe nutricional completo en PDF con fpdf2 (por días, semanas o comidas detalladas)."""
     target_date = request.args.get("date") or date.today().isoformat()
     valid_date(target_date)
+    start_date = request.args.get("start_date") or request.args.get("from")
+    end_date = request.args.get("end_date") or request.args.get("to")
+    mode = request.args.get("mode") or request.args.get("detail")
     weeks_param = request.args.get("weeks")
-    if weeks_param or request.args.get("mode") == "weeks":
+
+    if weeks_param or mode == "weeks":
         try:
             weeks = max(1, min(int(weeks_param or 12), 104))
         except ValueError:
@@ -971,10 +1119,24 @@ def export_pdf():
         days = max(1, min(int(request.args.get("days", 30)), 365))
     except ValueError:
         days = 30
+
+    if mode in ("meals", "comidas"):
+        with get_conn() as conn:
+            pdf_bytes = pdf_report.generate_meals_detail_pdf(
+                conn, target_date=target_date, days_range=days, start_date=start_date, end_date=end_date
+            )
+        filename = f"informe_comidas_{start_date}_a_{end_date}.pdf" if (start_date and end_date) else f"informe_comidas_{days}dias_{target_date}.pdf"
+        resp = Response(pdf_bytes, mimetype="application/pdf")
+        resp.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+        return resp
+
     with get_conn() as conn:
-        pdf_bytes = pdf_report.generate_macro_pdf(conn, target_date=target_date, days_range=days)
+        pdf_bytes = pdf_report.generate_macro_pdf(
+            conn, target_date=target_date, days_range=days, start_date=start_date, end_date=end_date
+        )
+    filename = f"informe_proceso_{start_date}_a_{end_date}.pdf" if (start_date and end_date) else f"informe_proceso_{days}dias_{target_date}.pdf"
     resp = Response(pdf_bytes, mimetype="application/pdf")
-    resp.headers["Content-Disposition"] = f'attachment; filename="informe_proceso_{days}dias_{target_date}.pdf"'
+    resp.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
     return resp
 
 

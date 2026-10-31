@@ -74,7 +74,7 @@ DEFAULT_SETTINGS = {
     "goal_protein": "185",
     "goal_carbs": "200",
     "goal_fat": "65",
-    "profile_tdee": "3350",
+    "profile_tdee": "3000",
     "profile_weight": "119",
     "profile_lbm": "85.5",
 }
@@ -263,6 +263,7 @@ def init_db():
             # Actualiza o crea ajustes por defecto
             for k, v in DEFAULT_SETTINGS.items():
                 conn.execute("INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)", (k, v))
+            conn.execute("UPDATE settings SET value='3000' WHERE key='profile_tdee' AND value='3350'")
 
             # Sembrar alimentos base solo si no se han sembrado antes (o si la tabla está vacía)
             foods_count = conn.execute("SELECT COUNT(*) FROM foods").fetchone()[0]

@@ -29,7 +29,7 @@ class MacroPDF(FPDF):
         self.cell(0, 8, f"Calculadora de Macros - Página {self.page_no()}/{{nb}}", align="C")
 
 
-def generate_macro_pdf(conn, target_date=None, days_range=30):
+def generate_macro_pdf(conn, target_date=None, days_range=30, start_date=None, end_date=None):
     """Genera un archivo PDF binario con el informe nutricional, métricas biométricas,
     gráfica de barras de calorías y tabla detallada de evolución del proceso."""
     target_date = target_date or date.today().isoformat()
@@ -45,7 +45,7 @@ def generate_macro_pdf(conn, target_date=None, days_range=30):
     goal_c = float(settings.get("goal_carbs", "200"))
     goal_f = float(settings.get("goal_fat", "65"))
 
-    tdee = float(settings.get("profile_tdee", "3350"))
+    tdee = float(settings.get("profile_tdee", "3000"))
     weight = float(settings.get("profile_weight", "119"))
     lbm = float(settings.get("profile_lbm", "85.5"))
     fat_mass = max(0.0, weight - lbm)
@@ -53,9 +53,16 @@ def generate_macro_pdf(conn, target_date=None, days_range=30):
     planned_deficit = tdee - goal_kcal
     prot_per_lbm = (goal_p / lbm) if lbm > 0 else 0.0
 
-    # Construir lista cronológica completa para el rango de días [target_date - days + 1, target_date]
-    start_dt = target_date_obj - timedelta(days=days_range - 1)
-    date_strs = [(start_dt + timedelta(days=i)).isoformat() for i in range(days_range)]
+    if start_date and end_date:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
+        if start_dt > end_dt:
+            start_dt, end_dt = end_dt, start_dt
+        days_range = (end_dt - start_dt).days + 1
+        date_strs = [(start_dt + timedelta(days=i)).isoformat() for i in range(days_range)]
+    else:
+        start_dt = target_date_obj - timedelta(days=days_range - 1)
+        date_strs = [(start_dt + timedelta(days=i)).isoformat() for i in range(days_range)]
 
     # Consultar entradas agregadas por día
     entries_sql = """
@@ -123,7 +130,10 @@ def generate_macro_pdf(conn, target_date=None, days_range=30):
     # ----------------------------------------------------
     pdf.set_font("helvetica", "B", 16)
     pdf.set_text_color(15, 23, 42)
-    period_label = f"ÚLTIMOS {days_range} DÍAS" if days_range > 1 else "REGISTRO DIARIO"
+    if start_date and end_date:
+        period_label = f"PERIODO {date_strs[0]} AL {date_strs[-1]} ({days_range} DÍAS)"
+    else:
+        period_label = f"ÚLTIMOS {days_range} DÍAS" if days_range > 1 else "REGISTRO DIARIO"
     pdf.cell(0, 8, f"INFORME DE PROCESO & MACROS - {period_label}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
     pdf.set_font("helvetica", "", 9.5)
@@ -670,7 +680,7 @@ def compute_weekly_summary(conn, target_date=None, weeks_count=12):
     goal_p = float(settings.get("goal_protein", "185"))
     goal_c = float(settings.get("goal_carbs", "200"))
     goal_f = float(settings.get("goal_fat", "65"))
-    tdee = float(settings.get("profile_tdee", "3350"))
+    tdee = float(settings.get("profile_tdee", "3000"))
     weight = float(settings.get("profile_weight", "119"))
     lbm = float(settings.get("profile_lbm", "85.5"))
 
@@ -997,3 +1007,206 @@ def generate_weekly_pdf(conn, target_date=None, weeks_count=12):
     pdf.output(buf)
     return buf.getvalue()
 
+
+
+def generate_meals_detail_pdf(conn, target_date=None, days_range=30, start_date=None, end_date=None):
+    """Genera un informe PDF ultra-detallado con todos los alimentos, comidas y cantidades
+    consumidas en el periodo seleccionado (modo Excel compacto y legible)."""
+    if start_date and end_date:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
+        if start_dt > end_dt:
+            start_dt, end_dt = end_dt, start_dt
+        days_range = (end_dt - start_dt).days + 1
+        date_strs = [(start_dt + timedelta(days=i)).isoformat() for i in range(days_range)]
+        target_date_obj = end_dt
+    else:
+        target_date = target_date or date.today().isoformat()
+        target_date_obj = datetime.strptime(target_date, "%Y-%m-%d").date()
+        start_dt = target_date_obj - timedelta(days=days_range - 1)
+        date_strs = [(start_dt + timedelta(days=i)).isoformat() for i in range(days_range)]
+
+    now_str = datetime.now().strftime("%d/%m/%Y %H:%M")
+
+    settings_rows = conn.execute("SELECT key, value FROM settings").fetchall()
+    settings = {r["key"]: r["value"] for r in settings_rows}
+
+    goal_kcal = float(settings.get("goal_kcal", "2150"))
+    goal_p = float(settings.get("goal_protein", "185"))
+    goal_c = float(settings.get("goal_carbs", "200"))
+    goal_f = float(settings.get("goal_fat", "65"))
+    tdee = float(settings.get("profile_tdee", "3000"))
+
+    weights_rows = conn.execute(
+        "SELECT date, kg FROM weights WHERE date >= ? AND date <= ? ORDER BY date",
+        (date_strs[0], date_strs[-1])
+    ).fetchall()
+    weights_by_date = {r["date"]: r["kg"] for r in weights_rows}
+
+    entries_rows = [
+        dict(r) for r in conn.execute(
+            "SELECT * FROM entries WHERE date >= ? AND date <= ? ORDER BY date DESC, time, id",
+            (date_strs[0], date_strs[-1])
+        ).fetchall()
+    ]
+
+    title_text = f"Desglose Detallado de Comidas - {days_range} Dias"
+    pdf = MacroPDF(title_text)
+    pdf.alias_nb_pages()
+    pdf.add_page()
+    pdf.set_y(10)
+
+    pdf.set_font("helvetica", "B", 15)
+    pdf.set_text_color(15, 23, 42)
+    period_label = f"{date_strs[0]} AL {date_strs[-1]} ({days_range} DIAS)"
+    pdf.cell(0, 8, f"DESGLOSE DETALLADO DE COMIDAS & MACROS - {period_label}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+    pdf.set_font("helvetica", "", 9)
+    pdf.set_text_color(100, 116, 139)
+    pdf.cell(0, 5, f"Historial completo de alimentos, cantidades y macros | Generado: {now_str}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.ln(3)
+
+    total_entries_count = len(entries_rows)
+    dates_with_entries = sorted(list(set(r["date"] for r in entries_rows)), reverse=True)
+    total_kcal = sum(float(r["kcal"] or 0) for r in entries_rows)
+    avg_kcal = (total_kcal / len(dates_with_entries)) if dates_with_entries else 0.0
+    total_deficit = sum(tdee - sum(float(e["kcal"] or 0) for e in entries_rows if e["date"] == d) for d in dates_with_entries)
+
+    y_cards = pdf.get_y()
+    card_w = 45
+    card_h = 18
+    cards = [
+        ("Dias con Registro", f"{len(dates_with_entries)} / {days_range} dias", f"{len(dates_with_entries)/days_range*100:.0f}% activo", (16, 185, 129)),
+        ("Promedio Diario", f"{avg_kcal:.0f} kcal", f"Obj: {goal_kcal:.0f} kcal", (16, 185, 129) if avg_kcal <= goal_kcal * 1.10 else (239, 68, 68)),
+        ("Deficit Acumulado", f"-{total_deficit:,.0f} kcal".replace(",", "."), f"vs TDEE {tdee:.0f} kcal", (37, 99, 235)),
+        ("Alimentos Totales", f"{total_entries_count} registros", "Desglose completo", (249, 115, 22)),
+    ]
+    for idx, (title, val, sub, col) in enumerate(cards):
+        cx = 10 + idx * 48
+        pdf.set_xy(cx, y_cards)
+        pdf.set_fill_color(248, 250, 252)
+        pdf.set_draw_color(226, 232, 240)
+        pdf.rect(cx, y_cards, card_w, card_h, "DF")
+
+        pdf.set_xy(cx + 2, y_cards + 2)
+        pdf.set_font("helvetica", "B", 7)
+        pdf.set_text_color(100, 116, 139)
+        pdf.cell(card_w - 4, 3, title, align="C")
+
+        pdf.set_xy(cx + 2, y_cards + 5.5)
+        pdf.set_font("helvetica", "B", 11)
+        pdf.set_text_color(*col)
+        pdf.cell(card_w - 4, 6, val, align="C")
+
+        pdf.set_xy(cx + 2, y_cards + 12)
+        pdf.set_font("helvetica", "", 7)
+        pdf.set_text_color(140, 140, 140)
+        pdf.cell(card_w - 4, 3, sub, align="C")
+
+    pdf.set_y(y_cards + card_h + 6)
+
+    tbl_w = [26, 84, 22, 18, 14, 13, 13]
+    tbl_headers = ["Comida", "Alimento / Plato", "Cantidad", "Kcal", "Prot (g)", "Hidr (g)", "Grasa (g)"]
+
+    def print_tbl_header():
+        pdf.set_fill_color(30, 41, 59)
+        pdf.set_text_color(255, 255, 255)
+        pdf.set_font("helvetica", "B", 7.5)
+        for w, h in zip(tbl_w, tbl_headers):
+            pdf.cell(w, 5.2, h, border=1, fill=True, align="C" if w <= 26 else ("L" if w > 50 else "R"))
+        pdf.ln()
+
+    if not dates_with_entries:
+        pdf.set_font("helvetica", "I", 10)
+        pdf.set_text_color(140, 140, 140)
+        pdf.cell(0, 14, "No hay comidas ni alimentos registrados en el periodo seleccionado.", align="C")
+    else:
+        entries_by_day = {}
+        for r in entries_rows:
+            entries_by_day.setdefault(r["date"], []).append(r)
+
+        weekday_es = ["Lunes", "Martes", "Miercoles", "Jueves", "Viernes", "Sabado", "Domingo"]
+
+        for d_str in dates_with_entries:
+            d_entries = entries_by_day[d_str]
+            day_kcal = sum(float(e["kcal"] or 0) for e in d_entries)
+            day_p = sum(float(e["protein"] or 0) for e in d_entries)
+            day_c = sum(float(e["carbs"] or 0) for e in d_entries)
+            day_f = sum(float(e["fat"] or 0) for e in d_entries)
+            day_def = tdee - day_kcal
+            w_val = weights_by_date.get(d_str)
+
+            if pdf.get_y() > 240:
+                pdf.add_page()
+
+            d_obj = datetime.strptime(d_str, "%Y-%m-%d").date()
+            w_name = weekday_es[d_obj.weekday()]
+            day_label = f"{w_name} {d_obj.strftime('%d/%m/%Y')}"
+            def_str = f"-{day_def:.0f} kcal" if day_def > 0 else f"+{abs(day_def):.0f} kcal"
+            w_str = f" | Peso: {w_val:.1f} kg" if w_val else ""
+
+            pdf.set_fill_color(241, 245, 249)
+            pdf.set_draw_color(203, 213, 225)
+            pdf.set_text_color(15, 23, 42)
+            pdf.set_font("helvetica", "B", 8)
+            banner_text = f"  {day_label}  -  Total: {day_kcal:.0f} kcal  (Deficit: {def_str} vs TDEE {tdee:.0f}){w_str}"
+            pdf.cell(190, 6, banner_text, border=1, fill=True, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+            print_tbl_header()
+
+            fill_row = False
+            for e in d_entries:
+                if pdf.get_y() > 275:
+                    pdf.add_page()
+                    print_tbl_header()
+
+                pdf.set_fill_color(250, 250, 252) if fill_row else pdf.set_fill_color(255, 255, 255)
+                pdf.set_text_color(30, 41, 59)
+                pdf.set_font("helvetica", "", 7.5)
+                row_h = 4.8
+
+                meal_txt = (e["meal"] or "otro").capitalize()
+                pdf.cell(tbl_w[0], row_h, meal_txt, border=1, fill=fill_row, align="C")
+
+                fname = (e["name"] or "").strip()
+                if len(fname) > 52:
+                    fname = fname[:49] + "..."
+                pdf.set_font("helvetica", "B", 7.5)
+                pdf.cell(tbl_w[1], row_h, f" {fname}", border=1, fill=fill_row, align="L")
+
+                qty_txt = f"{round(float(e['grams']))} g" if e.get("grams") else ("Solo kcal" if e.get("kind") == "quick" else "-")
+                pdf.set_font("helvetica", "", 7.5)
+                pdf.cell(tbl_w[2], row_h, qty_txt, border=1, fill=fill_row, align="C")
+
+                pdf.set_font("helvetica", "B", 7.5)
+                pdf.set_text_color(234, 88, 12)
+                pdf.cell(tbl_w[3], row_h, f"{round(float(e['kcal'] or 0))} ", border=1, fill=fill_row, align="R")
+
+                pdf.set_font("helvetica", "", 7.2)
+                pdf.set_text_color(37, 99, 235)
+                pdf.cell(tbl_w[4], row_h, f"{float(e['protein'] or 0):.1f} ", border=1, fill=fill_row, align="R")
+                pdf.set_text_color(217, 119, 6)
+                pdf.cell(tbl_w[5], row_h, f"{float(e['carbs'] or 0):.1f} ", border=1, fill=fill_row, align="R")
+                pdf.set_text_color(219, 39, 119)
+                pdf.cell(tbl_w[6], row_h, f"{float(e['fat'] or 0):.1f} ", border=1, fill=fill_row, align="R")
+
+                pdf.ln()
+                fill_row = not fill_row
+
+            pdf.set_fill_color(248, 250, 252)
+            pdf.set_font("helvetica", "B", 7.5)
+            pdf.set_text_color(15, 23, 42)
+            pdf.cell(tbl_w[0] + tbl_w[1] + tbl_w[2], 5.0, f"TOTAL {d_str} ", border=1, fill=True, align="R")
+            pdf.set_text_color(234, 88, 12)
+            pdf.cell(tbl_w[3], 5.0, f"{day_kcal:.0f} ", border=1, fill=True, align="R")
+            pdf.set_text_color(37, 99, 235)
+            pdf.cell(tbl_w[4], 5.0, f"{day_p:.1f} ", border=1, fill=True, align="R")
+            pdf.set_text_color(217, 119, 6)
+            pdf.cell(tbl_w[5], 5.0, f"{day_c:.1f} ", border=1, fill=True, align="R")
+            pdf.set_text_color(219, 39, 119)
+            pdf.cell(tbl_w[6], 5.0, f"{day_f:.1f} ", border=1, fill=True, align="R")
+            pdf.ln(7)
+
+    buf = io.BytesIO()
+    pdf.output(buf)
+    return buf.getvalue()

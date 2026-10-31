@@ -380,6 +380,35 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(pdf52.status_code, 200)
         self.assertTrue(pdf52.data.startswith(b"%PDF"))
 
+    def test_custom_period_history_and_meals_detail(self):
+        self.add(450, day="2026-10-10", meal="desayuno")
+        self.add(650, day="2026-10-11", meal="comida")
+        self.add(500, day="2026-10-15", meal="cena")
+
+        # Custom range history
+        h = self.c.get("/api/history?start_date=2026-10-10&end_date=2026-10-12").get_json()
+        self.assertEqual(h["logged_days"], 2)
+        self.assertEqual(h["tdee"], 3000.0)
+        self.assertEqual(len(h["days"]), 2)
+
+        # Meals detail endpoint
+        m = self.c.get("/api/history/meals?start_date=2026-10-10&end_date=2026-10-15").get_json()
+        self.assertEqual(m["logged_days"], 3)
+        self.assertEqual(m["total_entries"], 3)
+        self.assertEqual(m["tdee"], 3000.0)
+
+        # PDF meals detail
+        pdf_m = self.c.get("/api/export/pdf?mode=meals&start_date=2026-10-10&end_date=2026-10-15")
+        self.assertEqual(pdf_m.status_code, 200)
+        self.assertTrue(pdf_m.data.startswith(b"%PDF"))
+
+        # CSV filtered export
+        csv_r = self.c.get("/api/export.csv?start_date=2026-10-10&end_date=2026-10-11")
+        self.assertEqual(csv_r.status_code, 200)
+        self.assertIn("2026-10-10", csv_r.data.decode("utf-8"))
+        self.assertIn("2026-10-11", csv_r.data.decode("utf-8"))
+        self.assertNotIn("2026-10-15", csv_r.data.decode("utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

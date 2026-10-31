@@ -205,8 +205,8 @@ async function renderToday() {
                 : "var(--danger)"
             }">${remaining < 0 && t.kcal <= g.kcal * 1.10 ? "+" : ""}${r0(Math.abs(remaining))} kcal</div>
           </div>
-          <div class="stat"><div class="lbl">Déficit vs TDEE (3350)</div>
-            <div class="val" style="color:var(--accent)">-${r0(3350 - t.kcal)} kcal</div></div>
+          <div class="stat"><div class="lbl">Déficit vs TDEE (${r0(toNum(d.tdee || 3000))})</div>
+            <div class="val" style="color:var(--accent)">${(toNum(d.tdee || 3000) - t.kcal) >= 0 ? `-${r0(toNum(d.tdee || 3000) - t.kcal)}` : `+${r0(t.kcal - toNum(d.tdee || 3000))}`} kcal</div></div>
           <div class="stat"><div class="lbl">Objetivo</div><div class="val">${r0(g.kcal)} kcal</div></div>
         </div>
       </div>
@@ -1515,6 +1515,11 @@ async function renderProgress() {
   const isWeeks = state.histMode === "weeks";
   const n = state.histDays || 7;
   const wCount = state.histWeeks || 12;
+  const progressView = state.progressView || "summary"; // 'summary' or 'meals'
+
+  // Default start and end dates if not set
+  if (!state.histEndDate) state.histEndDate = isoDate(new Date());
+  if (!state.histStartDate) state.histStartDate = shiftDay(state.histEndDate, -(n - 1));
 
   if (isWeeks) {
     const [ws, weights] = await Promise.all([
@@ -1522,7 +1527,7 @@ async function renderProgress() {
       syncWeightsJournal(),
     ]);
     const g = ws.goals, a = ws.average, bio = ws.biometrics;
-    const tdee = toNum(bio.tdee || 3350);
+    const tdee = toNum(bio.tdee || 3000);
     const lbm = toNum(bio.lbm || 85.5);
     const weight = toNum(bio.weight || 119);
     const diff = a.kcal - g.kcal;
@@ -1566,7 +1571,7 @@ async function renderProgress() {
       </div>
 
       <div class="seg" style="margin-bottom:14px">
-        ${[7, 30, 90].map((d) => `<button onclick="state.histMode='days';state.histDays=${d};renderProgress()">${d} días</button>`).join("")}
+        ${[7, 30, 90].map((d) => `<button onclick="state.histMode='days';state.histDays=${d};state.histStartDate=shiftDay(state.histEndDate, -(${d}-1));renderProgress()">${d} días</button>`).join("")}
         <button class="${wCount === 12 ? "on" : ""}" onclick="state.histMode='weeks';state.histWeeks=12;renderProgress()">12 semanas</button>
         <button class="${wCount === 52 ? "on" : ""}" onclick="state.histMode='weeks';state.histWeeks=52;renderProgress()">52 semanas</button>
       </div>
@@ -1610,20 +1615,165 @@ async function renderProgress() {
     return;
   }
 
-  const [h, weights, s] = await Promise.all([api("GET", `/api/history?days=${n}`), syncWeightsJournal(), api("GET", "/api/settings")]);
+  // --- DAYS / CUSTOM PERIOD VIEW ---
+  const startDate = state.histStartDate;
+  const endDate = state.histEndDate;
+
+  const [h, weights, s] = await Promise.all([
+    api("GET", `/api/history?start_date=${startDate}&end_date=${endDate}`),
+    syncWeightsJournal(),
+    api("GET", "/api/settings"),
+  ]);
+
   const g = h.goals, a = h.average, p = s.profile || {};
-  const tdee = toNum(p.tdee || 3350);
+  const tdee = toNum(h.tdee || p.tdee || 3000);
   const lbm = toNum(p.lbm || 85.5);
   const lastW = weights[weights.length - 1];
   const weight = lastW ? lastW.kg : toNum(p.weight || 119);
   const byDate = Object.fromEntries(h.days.map((d) => [d.date, d]));
-  const series = []; for (let i = n - 1; i >= 0; i--) { const dt = shiftDay(isoDate(new Date()), -i); series.push({ date: dt, kcal: byDate[dt]?.kcal || 0 }); }
-  const wFrom = shiftDay(isoDate(new Date()), -Math.max(n, 30));
-  const wSel = weights.filter((w) => w.date >= wFrom);
+  
+  // Calculate all days in range for series chart
+  const series = [];
+  let curD = new Date(startDate);
+  const endD = new Date(endDate);
+  while (curD <= endD) {
+    const dt = isoDate(curD);
+    series.push({ date: dt, kcal: byDate[dt]?.kcal || 0 });
+    curD.setDate(curD.getDate() + 1);
+  }
+
+  const wSel = weights.filter((w) => w.date >= startDate && w.date <= endDate);
   const diff = a.kcal - g.kcal;
   const kc = a.protein * 4 + a.carbs * 4 + a.fat * 9;
   const share = (v) => kc ? Math.round(v / kc * 100) : 0;
 
+  // View toggle & Range picker markup
+  const pickerMarkup = `
+    <div class="range-picker-card">
+      <div class="row between" style="flex-wrap:wrap;gap:8px">
+        <strong>${icon("calendar", 15)} Periodo de Análisis</strong>
+        <div class="seg" style="margin:0">
+          ${[7, 30, 90].map((d) => `<button class="${n === d ? "on" : ""}" onclick="state.histMode='days';state.histDays=${d};state.histEndDate=isoDate(new Date());state.histStartDate=shiftDay(state.histEndDate, -(${d}-1));renderProgress()">${d}d</button>`).join("")}
+          <button onclick="state.histMode='weeks';state.histWeeks=12;renderProgress()">12 sem</button>
+          <button onclick="state.histMode='weeks';state.histWeeks=52;renderProgress()">52 sem</button>
+        </div>
+      </div>
+      <div class="range-picker-row">
+        <div class="range-field">
+          <label>Desde:</label>
+          <input type="date" id="pStart" value="${startDate}">
+        </div>
+        <div class="range-field">
+          <label>Hasta:</label>
+          <input type="date" id="pEnd" value="${endDate}">
+        </div>
+        <button class="btn small primary" id="applyRangeBtn" style="padding:6px 12px">${icon("check", 14)} Aplicar</button>
+      </div>
+    </div>
+
+    <div class="view-switch">
+      <button class="view-switch-btn ${progressView === 'summary' ? 'active' : ''}" onclick="state.progressView='summary';renderProgress()">
+        ${icon("chart", 15)} Resumen & Gráficas
+      </button>
+      <button class="view-switch-btn ${progressView === 'meals' ? 'active' : ''}" onclick="state.progressView='meals';renderProgress()">
+        ${icon("table", 15)} Desglose de Comidas (Modo Excel)
+      </button>
+    </div>
+  `;
+
+  // IF USER SELECTED MEALS BREAKDOWN (MODO EXCEL)
+  if (progressView === "meals") {
+    const mealsData = await api("GET", `/api/history/meals?start_date=${startDate}&end_date=${endDate}`);
+    const daysList = mealsData.days || [];
+
+    $("#view").innerHTML = `<h1>Desglose Detallado de Comidas</h1>
+      ${pickerMarkup}
+
+      <div class="card" style="border-color:color-mix(in srgb, var(--accent) 35%, var(--line));background:color-mix(in srgb, var(--accent) 5%, var(--card))">
+        <div class="row between" style="gap:12px;flex-wrap:wrap">
+          <div>
+            <strong style="font-size:1.05rem;display:block;margin-bottom:2px">Exportar todas las comidas (${startDate} a ${endDate})</strong>
+            <div class="muted" style="font-size:.84rem">Descarga el registro completo con cada alimento, cantidades y macros en formato tabla tipo Excel o PDF.</div>
+          </div>
+          <div class="row" style="gap:8px;flex-wrap:wrap">
+            <a class="btn primary" href="/api/export/pdf?mode=meals&start_date=${startDate}&end_date=${endDate}" download style="padding:9px 13px;font-size:.86rem">
+              ${icon("download", 16)} PDF Detallado de Comidas
+            </a>
+            <a class="btn" href="/api/export.csv?start_date=${startDate}&end_date=${endDate}" download style="padding:9px 13px;font-size:.86rem">
+              ${icon("download", 16)} Exportar Excel / CSV
+            </a>
+          </div>
+        </div>
+      </div>
+
+      ${daysList.length === 0 ? emptyBox("table", "No hay comidas registradas en este periodo.") : daysList.map((day) => `
+        <div class="excel-box">
+          <div class="excel-day-hdr">
+            <div>
+              <strong style="font-size:1rem;text-transform:capitalize">${parseISO(day.date).toLocaleDateString("es-ES", { weekday: "long", day: "numeric", month: "short", year: "numeric" })}</strong>
+              ${day.weight ? `<span class="combo-badge" style="margin-left:8px;background:var(--card)">${day.weight} kg</span>` : ""}
+            </div>
+            <div style="text-align:right">
+              <span class="combo-badge" style="background:${day.totals.kcal > g.kcal * 1.10 ? 'var(--danger)' : 'var(--accent)'};color:var(--accent-ink)">${r0(day.totals.kcal)} kcal</span>
+              <small class="muted" style="margin-left:4px">Déf: -${r0(day.deficit_vs_tdee)}</small>
+            </div>
+          </div>
+
+          <table class="excel-table">
+            <thead>
+              <tr>
+                <th>Comida / Alimento</th>
+                <th style="text-align:right">Gramos</th>
+                <th style="text-align:right">Kcal</th>
+                <th style="text-align:right">Prot (g)</th>
+                <th style="text-align:right">HC (g)</th>
+                <th style="text-align:right">Grasa (g)</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${day.meals.map((m) => `
+                <tr class="meal-row">
+                  <td colspan="6">${esc(m.meal_name.toUpperCase())} · <span style="font-weight:normal">${r0(m.totals.kcal)} kcal (P:${r0(m.totals.protein)} C:${r0(m.totals.carbs)} G:${r0(m.totals.fat)})</span></td>
+                </tr>
+                ${m.items.map((it) => `
+                  <tr>
+                    <td style="padding-left:14px">${esc(it.food_name)}</td>
+                    <td style="text-align:right">${it.grams ? `${r0(it.grams)}g` : "—"}</td>
+                    <td style="text-align:right;font-weight:700">${r0(it.kcal)}</td>
+                    <td style="text-align:right;color:var(--p)">${r1(it.protein)}</td>
+                    <td style="text-align:right;color:var(--c)">${r1(it.carbs)}</td>
+                    <td style="text-align:right;color:var(--f)">${r1(it.fat)}</td>
+                  </tr>
+                `).join("")}
+              `).join("")}
+              <tr class="total-row">
+                <td><strong>TOTAL DÍA</strong></td>
+                <td style="text-align:right">—</td>
+                <td style="text-align:right;color:var(--kcal)">${r0(day.totals.kcal)}</td>
+                <td style="text-align:right;color:var(--p)">${r0(day.totals.protein)}g</td>
+                <td style="text-align:right;color:var(--c)">${r0(day.totals.carbs)}g</td>
+                <td style="text-align:right;color:var(--f)">${r0(day.totals.fat)}g</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      `).join("")}
+    `;
+
+    $("#applyRangeBtn").onclick = () => {
+      const s = $("#pStart").value;
+      const e = $("#pEnd").value;
+      if (s && e) {
+        state.histStartDate = s;
+        state.histEndDate = e;
+        state.histDays = null;
+        renderProgress();
+      }
+    };
+    return;
+  }
+
+  // --- DEFAULT SUMMARY VIEW ---
   $("#view").innerHTML = `<h1>Progreso & Déficit</h1>
     <div class="bio-card">
       <div class="row between">
@@ -1638,40 +1788,37 @@ async function renderProgress() {
       </div>
     </div>
 
+    ${pickerMarkup}
+
     <div class="card" style="border-color:color-mix(in srgb, var(--accent) 35%, var(--line));background:color-mix(in srgb, var(--accent) 5%, var(--card))">
       <div class="row between" style="gap:12px;flex-wrap:wrap">
         <div>
           <div class="row" style="gap:6px;margin-bottom:2px">
-            <span class="combo-badge" style="background:var(--accent);color:var(--accent-ink)">${icon("chart", 12)} Informes PDF del Proceso</span>
-            <span class="muted" style="font-size:.78rem">· Diario y Semanal (12 y 52 semanas)</span>
+            <span class="combo-badge" style="background:var(--accent);color:var(--accent-ink)">${icon("chart", 12)} Informes del Proceso</span>
+            <span class="muted" style="font-size:.78rem">· Periodo: ${startDate} a ${endDate}</span>
           </div>
-          <strong style="font-size:1.05rem;display:block;margin:2px 0">Descargar informe detallado en PDF</strong>
-          <div class="muted" style="font-size:.84rem">Descarga el informe de los últimos ${n} días, o los informes por semanas (12 semanas o 52 semanas).</div>
+          <strong style="font-size:1.05rem;display:block;margin:2px 0">Descargar informes en PDF y Excel</strong>
+          <div class="muted" style="font-size:.84rem">Descarga el resumen del periodo seleccionado, el desglose de comidas o los informes por semanas.</div>
         </div>
         <div class="row" style="gap:6px;flex-wrap:wrap">
-          <a class="btn primary" href="/api/export/pdf?date=${state.date}&days=${n}" download style="padding:9px 12px;font-size:.85rem">
-            ${icon("download", 15)} PDF (${n} días)
+          <a class="btn primary" href="/api/export/pdf?start_date=${startDate}&end_date=${endDate}" download style="padding:9px 12px;font-size:.85rem">
+            ${icon("download", 15)} PDF Resumen
+          </a>
+          <a class="btn primary" href="/api/export/pdf?mode=meals&start_date=${startDate}&end_date=${endDate}" download style="padding:9px 12px;font-size:.85rem">
+            ${icon("download", 15)} PDF Comidas (Excel)
           </a>
           <a class="btn" href="/api/export/pdf?mode=weeks&weeks=12&date=${state.date}" download style="padding:9px 12px;font-size:.85rem">
-            ${icon("download", 15)} PDF 12 Sem.
+            ${icon("download", 15)} 12 Sem.
           </a>
-          <a class="btn" href="/api/export/pdf?mode=weeks&weeks=52&date=${state.date}" download style="padding:9px 12px;font-size:.85rem">
-            ${icon("download", 15)} PDF 52 Sem.
-          </a>
-          <a class="btn" href="/report?date=${state.date}&days=${n}" target="_blank" title="Ver en navegador" style="padding:9px 10px">
+          <a class="btn" href="/report?start_date=${startDate}&end_date=${endDate}" target="_blank" title="Ver en navegador" style="padding:9px 10px">
             ${icon("eye", 15)}
           </a>
         </div>
       </div>
     </div>
 
-    <div class="seg" style="margin-bottom:14px">
-      ${[7, 30, 90].map((d) => `<button class="${d === n ? "on" : ""}" onclick="state.histMode='days';state.histDays=${d};renderProgress()">${d} días</button>`).join("")}
-      <button onclick="state.histMode='weeks';state.histWeeks=12;renderProgress()">12 semanas</button>
-      <button onclick="state.histMode='weeks';state.histWeeks=52;renderProgress()">52 semanas</button>
-    </div>
     <div class="card">
-      <div class="muted">Promedio diario · ${h.logged_days} día(s) con registros</div>
+      <div class="muted">Promedio diario · ${h.logged_days} día(s) con registros (${startDate} a ${endDate})</div>
       <div class="row between" style="margin:8px 0 12px"><div><span class="big">${r0(a.kcal)}</span> <span class="muted">kcal</span></div>
         ${h.logged_days ? `<div class="chip" style="cursor:default;color:${diff > 0 ? "var(--danger)" : "var(--accent)"}">${diff > 0 ? "+" : ""}${r0(diff)} vs objetivo</div>` : ""}</div>
       ${barChart(series, g.kcal)}
@@ -1682,11 +1829,11 @@ async function renderProgress() {
         <div><i style="background:var(--c)"></i>Hidratos · <b>${r0(a.carbs)} g</b> · ${share(a.carbs * 4)}%</div>
         <div><i style="background:var(--f)"></i>Grasa · <b>${r0(a.fat)} g</b> · ${share(a.fat * 9)}%</div></div></div></div>
 
-    <h2>${icon("gauge", 15)} Evolución de Peso</h2>
+    <h2>${icon("gauge", 15)} Evolución de Peso (Interactivo)</h2>
     <div class="card">
       <div class="row between">
         <div>${lastW ? `<span class="big">${lastW.kg}</span> <span class="muted">kg · ${lastW.date}</span>` : '<span class="muted">Sin pesos apuntados</span>'}</div>
-        <button class="btn small" onclick="go('weights')">${icon("gauge", 14)} Abrir pestaña Peso (día por día)</button>
+        <button class="btn small" onclick="go('weights')">${icon("gauge", 14)} Pestaña Peso</button>
       </div>
       <div style="margin:10px 0">${lineChart(wSel)}</div>
       <div class="row"><input id="wk" inputmode="decimal" placeholder="Peso de hoy (kg)" value="${lastW?.date === isoDate(new Date()) ? lastW.kg : ""}">
@@ -1697,8 +1844,20 @@ async function renderProgress() {
     ${h.days.map((d) => `<div class="item" onclick="state.date='${d.date}';go('today')"><div class="grow">
       <div class="row between"><div class="title" style="text-transform:capitalize">${parseISO(d.date).toLocaleDateString("es-ES", { weekday: "short", day: "numeric", month: "short" })}</div><div class="kcal-tag">${r0(d.kcal)}<small>kcal</small></div></div>
       ${macroLine(d)}<div class="bar ${d.kcal > g.kcal ? "over" : ""}"><i style="width:${Math.min(100, d.kcal / g.kcal * 100)}%;background:var(--kcal)"></i></div></div></div>`).join("") || emptyBox("chart", "Sin registros en este periodo.")}`;
+
   $("#saveW").onclick = async () => { const kg = toNum($("#wk").value); if (!kg) return toast("Escribe tu peso"); await api("POST", "/api/weights", { date: isoDate(new Date()), kg }); toast("Peso guardado", true); renderProgress(); };
+  $("#applyRangeBtn").onclick = () => {
+    const s = $("#pStart").value;
+    const e = $("#pEnd").value;
+    if (s && e) {
+      state.histStartDate = s;
+      state.histEndDate = e;
+      state.histDays = null;
+      renderProgress();
+    }
+  };
 }
+
 
 // ====================================================================== AJUSTES
 const ACTIVITY = [["1.2", "Sedentario (poco o nada de ejercicio)"], ["1.375", "Ligero (1-3 días/semana)"], ["1.55", "Moderado (3-5 días/semana)"], ["1.725", "Alto (6-7 días/semana)"], ["1.9", "Muy alto (trabajo físico + entreno)"]];
@@ -1813,7 +1972,7 @@ async function renderSettings() {
       </div>
       <h2 style="margin:16px 0 6px">${icon("gauge", 14)} Datos Biométricos</h2>
       <div class="grid3">
-        <div><label style="margin-top:0">Gasto TDEE (kcal)</label><input id="p_tdee" inputmode="decimal" value="${p.tdee || 3350}"></div>
+        <div><label style="margin-top:0">Gasto TDEE (kcal)</label><input id="p_tdee" inputmode="decimal" value="${p.tdee || 3000}"></div>
         <div><label style="margin-top:0">Peso actual (kg)</label><input id="p_weight" inputmode="decimal" value="${p.weight || lastW || 119}"></div>
         <div><label style="margin-top:0">Masa Magra LBM (kg)</label><input id="p_lbm" inputmode="decimal" value="${p.lbm || 85.5}"></div>
       </div>
@@ -1868,7 +2027,7 @@ async function renderSettings() {
     const goals = Object.fromEntries(["kcal", "protein", "carbs", "fat"].map((k) => [k, toNum($("#g_" + k).value)]));
     const profile = {
       ...(p || {}),
-      tdee: toNum($("#p_tdee")?.value || 3350),
+      tdee: toNum($("#p_tdee")?.value || 3000),
       weight: toNum($("#p_weight")?.value || 119),
       lbm: toNum($("#p_lbm")?.value || 85.5),
     };
