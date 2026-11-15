@@ -1862,13 +1862,17 @@ async function renderSettings() {
   $("#saveGhToken")?.addEventListener("click", async () => {
     const t = $("#gh_token").value.trim();
     if (!t) return toast("Pega un token de GitHub válido");
+    localStorage.setItem("saved_gh_token", t);
     await api("POST", "/api/github/token", { token: t });
     toast("Token de GitHub guardado y sincronizando...", true);
+    checkCloudSync();
     setTimeout(renderSettings, 1200);
   });
   $("#deleteGhToken")?.addEventListener("click", async () => {
+    localStorage.removeItem("saved_gh_token");
     await api("POST", "/api/github/token", { token: "" });
     toast("Token eliminado", true);
+    checkCloudSync();
     renderSettings();
   });
   const doSync = async (mode, label) => {
@@ -1946,8 +1950,47 @@ function renderLogin() {
 }
 
 // ======================================================================== ARRANQUE
+
+// Comprobación y auto-reconexión automática de sincronización con la nube
+async function checkCloudSync() {
+  try {
+    const gh = await api("GET", "/api/github/status");
+    const savedToken = localStorage.getItem("saved_gh_token");
+    if (!gh.configured && savedToken) {
+      const res = await api("POST", "/api/github/token", { token: savedToken });
+      if (res.ok) {
+        console.log("Token de GitHub re-sincronizado automáticamente desde el navegador.");
+      }
+    }
+    updateCloudStatusBadge(gh.configured || !!savedToken, gh.last_error);
+  } catch {}
+}
+
+function updateCloudStatusBadge(isConfigured, lastError) {
+  let badge = $("#cloudStatusBadge");
+  if (!badge) {
+    const header = $("header .datebar") || $("header");
+    if (header) {
+      badge = document.createElement("div");
+      badge.id = "cloudStatusBadge";
+      badge.style.cursor = "pointer";
+      badge.onclick = () => go("settings");
+      header.appendChild(badge);
+    }
+  }
+  if (!badge) return;
+  if (isConfigured && !lastError) {
+    badge.innerHTML = `<span style="font-size:0.75rem;padding:3px 8px;border-radius:12px;background:rgba(16,185,129,0.15);color:var(--accent);font-weight:600;display:inline-flex;align-items:center;gap:4px">● Nube conectada</span>`;
+    badge.title = "Guardado automático activo en GitHub";
+  } else {
+    badge.innerHTML = `<span style="font-size:0.75rem;padding:3px 8px;border-radius:12px;background:rgba(239,68,68,0.2);color:var(--danger);font-weight:700;display:inline-flex;align-items:center;gap:4px">⚠️ Sin conectar a GitHub (Ajustes)</span>`;
+    badge.title = "Los cambios solo se guardan en la memoria temporal de Render si no configuras el Token de GitHub en Ajustes o en el Dashboard de Render.";
+  }
+}
+
 (async function boot() {
   buildNav();
+  checkCloudSync();
   if ("serviceWorker" in navigator && window.isSecureContext) navigator.serviceWorker.register("/sw.js").catch(() => {});
   try { const a = await api("GET", "/api/auth/status"); if (a.pin_set && !a.authed) return renderLogin(); } catch { return; }
   render();

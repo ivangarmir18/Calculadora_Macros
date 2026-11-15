@@ -295,15 +295,19 @@ def push_to_github() -> dict:
                     if meta.get("content"):
                         raw_remote = base64.b64decode(meta["content"])
                     elif meta.get("download_url"):
-                        req = urllib.request.Request(meta["download_url"], headers={"User-Agent": "CalculadoraMacros-Sync/1.0"})
+                        headers = {"User-Agent": "CalculadoraMacros-Sync/1.0"}
+                        if cfg.get("token"):
+                            headers["Authorization"] = f"Bearer {cfg['token']}"
+                        req = urllib.request.Request(meta["download_url"], headers=headers)
                         with urllib.request.urlopen(req, timeout=15) as r:
                             raw_remote = r.read()
                     if raw_remote and raw_remote.startswith(b"SQLite format 3"):
                         with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as rtf:
                             rtf.write(raw_remote)
-                            rtmp = Path(rtf.name)
+                            tmp_name = rtf.name
+                        rtmp = Path(tmp_name)
                         try:
-                            rconn = sqlite3.connect(rtmp)
+                            rconn = sqlite3.connect(str(rtmp))
                             try:
                                 r_entries = rconn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
                             finally:
@@ -358,7 +362,7 @@ def push_to_github() -> dict:
             _state["syncing"] = False
 
 
-def schedule_push(delay: float = 1.5):
+def schedule_push(delay: float = 0.4):
     """Programa una subida a GitHub en segundo plano (con debounce para agrupar cambios seguidos)."""
     global _timer
     if _suppress_sync:
