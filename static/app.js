@@ -130,6 +130,30 @@ document.addEventListener("visibilitychange", () => {
 // ============================================================================ HOY
 async function renderToday() {
   let d = await api("GET", `/api/day/${state.date}`);
+  const savedDay = getLocalCache("journal_day:" + state.date, []);
+  if (Array.isArray(savedDay) && savedDay.length > (d.entries?.length || 0)) {
+    try {
+      const serverKeys = new Set((d.entries || []).map((e) => `${e.meal}|${e.name}|${Math.round(e.kcal)}`));
+      const missing = savedDay.filter((e) => !serverKeys.has(`${e.meal}|${e.name}|${Math.round(e.kcal)}`));
+      if (missing.length > 0) {
+        const byM = {};
+        missing.forEach((e) => (byM[e.meal || "otro"] ||= []).push({
+          name: e.name,
+          grams: e.grams,
+          kcal: e.kcal,
+          protein: e.protein,
+          carbs: e.carbs,
+          fat: e.fat,
+          matched_food_id: e.food_id || null,
+        }));
+        for (const [m, items] of Object.entries(byM)) {
+          await api("POST", "/api/ai/apply", { date: state.date, meal: m, items });
+        }
+        d = await api("GET", `/api/day/${state.date}`);
+        toast("Registros recuperados de la memoria local", true);
+      }
+    } catch {}
+  }
   if (d.entries && d.entries.length > 0) {
     setLocalCache("journal_day:" + state.date, d.entries);
   }
@@ -1269,6 +1293,18 @@ function editFood(id, foods) {
 // ===================================================================== PESO (DESGLOSADO DÍA POR DÍA)
 async function syncWeightsJournal() {
   let weights = await api("GET", "/api/weights");
+  const savedW = getLocalCache("journal_weights", []);
+  if (Array.isArray(savedW) && savedW.length > (weights?.length || 0)) {
+    try {
+      const serverDates = new Set((weights || []).map((w) => w.date));
+      for (const w of savedW) {
+        if (!serverDates.has(w.date)) {
+          await api("POST", "/api/weights", { date: w.date, kg: w.kg });
+        }
+      }
+      weights = await api("GET", "/api/weights");
+    } catch {}
+  }
   if (weights && weights.length > 0) {
     setLocalCache("journal_weights", weights);
   }
