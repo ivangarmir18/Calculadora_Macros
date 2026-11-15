@@ -234,10 +234,45 @@ def seed_combos(conn):
                     )
 
 
+def create_backup(label: str = "auto") -> Path | None:
+    """Crea una copia de seguridad timestamped en data/backups/ y retiene las ultimas 20."""
+    if not DB_PATH.is_file() or DB_PATH.stat().st_size == 0 or "test.db" in str(DB_PATH):
+        return None
+    try:
+        from datetime import datetime
+        import shutil
+        bdir = DATA_DIR / "backups"
+        bdir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        target = bdir / f"macros_{ts}_{label}.db"
+        
+        src = sqlite3.connect(DB_PATH)
+        try:
+            dst = sqlite3.connect(target)
+            try:
+                src.backup(dst)
+            finally:
+                dst.close()
+        finally:
+            src.close()
+            
+        backups = sorted(bdir.glob("macros_*.db"), key=lambda p: p.stat().st_mtime)
+        while len(backups) > 20:
+            oldest = backups.pop(0)
+            try:
+                oldest.unlink(missing_ok=True)
+            except Exception:
+                pass
+        return target
+    except Exception:
+        return None
+
+
 def init_db():
     global _in_init
     _in_init = True
     try:
+        create_backup("startup")
         # Al arrancar (ej. en Render tras despertar o en PC), traer la última DB de GitHub si existe
         if "test.db" not in str(DB_PATH):
             try:

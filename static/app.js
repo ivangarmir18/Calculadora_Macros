@@ -132,27 +132,6 @@ async function renderToday() {
   let d = await api("GET", `/api/day/${state.date}`);
   if (d.entries && d.entries.length > 0) {
     setLocalCache("journal_day:" + state.date, d.entries);
-  } else {
-    const saved = getLocalCache("journal_day:" + state.date, []);
-    if (Array.isArray(saved) && saved.length > 0) {
-      try {
-        const byM = {};
-        saved.forEach((e) => (byM[e.meal || "otro"] ||= []).push({
-          name: e.name,
-          grams: e.grams,
-          kcal: e.kcal,
-          protein: e.protein,
-          carbs: e.carbs,
-          fat: e.fat,
-          matched_food_id: e.food_id || null,
-        }));
-        for (const [m, items] of Object.entries(byM)) {
-          await api("POST", "/api/ai/apply", { date: state.date, meal: m, items });
-        }
-        d = await api("GET", `/api/day/${state.date}`);
-        toast("Registros recuperados automáticamente", true);
-      } catch {}
-    }
   }
   const isToday = state.date === isoDate(new Date());
   const label = parseISO(state.date).toLocaleDateString("es-ES", { weekday: "long", day: "numeric", month: "long" });
@@ -1292,16 +1271,6 @@ async function syncWeightsJournal() {
   let weights = await api("GET", "/api/weights");
   if (weights && weights.length > 0) {
     setLocalCache("journal_weights", weights);
-  } else {
-    const saved = getLocalCache("journal_weights", []);
-    if (Array.isArray(saved) && saved.length > 0) {
-      try {
-        for (const w of saved) {
-          await api("POST", "/api/weights", { date: w.date, kg: w.kg });
-        }
-        weights = await api("GET", "/api/weights");
-      } catch {}
-    }
   }
   return weights;
 }

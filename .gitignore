@@ -6,3 +6,5 @@ venv/
 .env
 .vscode/
 cloudflared.exe
+data/backups/
+*.pdf

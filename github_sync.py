@@ -246,6 +246,7 @@ def pull_from_github(force: bool = False) -> dict:
                     finally:
                         tconn.close()
 
+                    db.create_backup("pre_pull")
                     shutil.move(str(tmp_path), str(db.DB_PATH))
                 finally:
                     if tmp_path.exists():
@@ -286,6 +287,42 @@ def push_to_github() -> dict:
                 _state["dirty"] = False
                 _state["last_error"] = None
                 return {"ok": True, "unchanged": True, "sha": remote_sha}
+
+                        # BLINDAJE: Si el remoto tiene base de datos, verificar que no estemos pisando datos
+            if remote_sha and meta and meta.get("size", 0) > 0:
+                try:
+                    raw_remote = None
+                    if meta.get("content"):
+                        raw_remote = base64.b64decode(meta["content"])
+                    elif meta.get("download_url"):
+                        req = urllib.request.Request(meta["download_url"], headers={"User-Agent": "CalculadoraMacros-Sync/1.0"})
+                        with urllib.request.urlopen(req, timeout=15) as r:
+                            raw_remote = r.read()
+                    if raw_remote and raw_remote.startswith(b"SQLite format 3"):
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as rtf:
+                            rtf.write(raw_remote)
+                            rtmp = Path(rtf.name)
+                        try:
+                            rconn = sqlite3.connect(rtmp)
+                            try:
+                                r_entries = rconn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
+                            finally:
+                                rconn.close()
+                            
+                            lconn = sqlite3.connect(db.DB_PATH)
+                            try:
+                                l_entries = lconn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
+                            finally:
+                                lconn.close()
+
+                            if r_entries > l_entries:
+                                _state["last_error"] = f"Push cancelado por seguridad: el remoto tiene {r_entries} entradas vs {l_entries} locales. Se protege el remoto."
+                                return {"ok": False, "skipped": "remote_has_more_entries"}
+                        finally:
+                            if rtmp.exists():
+                                rtmp.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
             url = f"https://api.github.com/repos/{cfg['repo']}/contents/{REMOTE_DB_PATH}"
             now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
