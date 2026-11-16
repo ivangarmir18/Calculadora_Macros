@@ -69,7 +69,7 @@ function lineChart(points) {
     const diff = prev !== null ? (pt.kg - prev) : null;
     const diffStr = diff !== null ? (diff > 0 ? `+${diff.toFixed(1)}` : diff.toFixed(1)) + " kg" : "";
     return `<g class="chart-point-g" data-date="${pt.date}" data-kg="${pt.kg}" data-diff="${diffStr}" data-x="${p[0].toFixed(1)}" onmouseenter="chartPointHover(this)" onmouseleave="chartPointLeave(this)" onclick="chartPointClick(this)">
-      <circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="9" fill="transparent" style="cursor:pointer;"/>
+      <circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="10" fill="none" pointer-events="all" style="cursor:pointer;"/>
       <circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="3" fill="var(--accent)" class="chart-dot"/>
       <title>${pt.date}: ${pt.kg} kg ${diffStr ? '(' + diffStr + ')' : ''}</title>
     </g>`;

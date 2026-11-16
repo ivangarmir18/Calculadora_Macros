@@ -287,6 +287,20 @@ def push_to_github() -> dict:
                 _state["last_error"] = None
                 return {"ok": True, "unchanged": True, "sha": remote_sha}
 
+            # Blindaje anti-vaciado: si la base local está vacía (< 10 entradas) y el remoto ya tiene datos, no pisar
+            if remote_sha and meta and meta.get("size", 0) > 10000:
+                try:
+                    lconn = sqlite3.connect(db.DB_PATH)
+                    try:
+                        l_entries = lconn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
+                    finally:
+                        lconn.close()
+                    if l_entries < 10:
+                        _state["last_error"] = f"Push cancelado por seguridad: local tiene solo {l_entries} entradas."
+                        return {"ok": False, "skipped": "local_too_small"}
+                except Exception:
+                    pass
+
             url = f"https://api.github.com/repos/{cfg['repo']}/contents/{REMOTE_DB_PATH}"
             now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             payload = {
