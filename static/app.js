@@ -47,6 +47,8 @@ const state = {
   histMode: "days",
   histWeeks: 12,
   weightDays: 14,
+  weightChartMode: "days",
+  weightChartDays: 90,
   foodCat: "todos",
   presetCat: "todos",
 };
@@ -1269,6 +1271,66 @@ async function syncWeightsJournal() {
   return weights || [];
 }
 
+function aggregateWeights(weights, mode, rangeDays, todayStr) {
+  const fromDate = shiftDay(todayStr, -(rangeDays - 1));
+  const inRange = (weights || []).filter((w) => w.date >= fromDate && w.date <= todayStr);
+  if (!inRange.length) return { points: [], rawCount: 0, spanDays: 0 };
+
+  const utcMs = (s) => { const [y, m, d] = s.split("-").map(Number); return Date.UTC(y, m - 1, d); };
+  const daysBetween = (a, b) => Math.round((utcMs(b) - utcMs(a)) / 86400000);
+  const fmtShort = (s) => `${s.slice(8)}/${s.slice(5, 7)}`;
+  const spanDays = daysBetween(inRange[0].date, inRange[inRange.length - 1].date) + 1;
+
+  if (mode === "days") {
+    return {
+      points: inRange.map((w) => ({ date: w.date, kg: w.kg })),
+      rawCount: inRange.length,
+      spanDays,
+    };
+  }
+
+  const groups = new Map();
+  if (mode === "3d") {
+    for (const w of inRange) {
+      const bucket = Math.floor(daysBetween(w.date, todayStr) / 3);
+      if (!groups.has(bucket)) {
+        const end = shiftDay(todayStr, -(bucket * 3));
+        const start = shiftDay(todayStr, -(bucket * 3 + 2));
+        groups.set(bucket, { start, end, items: [] });
+      }
+      groups.get(bucket).items.push(w);
+    }
+    const points = [...groups.entries()]
+      .sort((a, b) => b[0] - a[0])
+      .map(([, g]) => {
+        const avg = r1(g.items.reduce((s, x) => s + x.kg, 0) / g.items.length);
+        const last = g.items[g.items.length - 1].date;
+        return { date: last, kg: avg, label: `${fmtShort(g.start)}–${fmtShort(g.end)} (${g.items.length}d)` };
+      });
+    return { points, rawCount: inRange.length, spanDays };
+  }
+
+  // mode === "weeks" (lunes a domingo)
+  for (const w of inRange) {
+    const d = parseISO(w.date);
+    const dow = (d.getDay() + 6) % 7;
+    const weekStart = shiftDay(w.date, -dow);
+    const weekEnd = shiftDay(weekStart, 6);
+    if (!groups.has(weekStart)) {
+      groups.set(weekStart, { start: weekStart, end: weekEnd, items: [] });
+    }
+    groups.get(weekStart).items.push(w);
+  }
+  const points = [...groups.entries()]
+    .sort((a, b) => (a[0] < b[0] ? -1 : 1))
+    .map(([, g]) => {
+      const avg = r1(g.items.reduce((s, x) => s + x.kg, 0) / g.items.length);
+      const last = g.items[g.items.length - 1].date;
+      return { date: last, kg: avg, label: `Sem ${fmtShort(g.start)}–${fmtShort(g.end)} (${g.items.length}d)` };
+    });
+  return { points, rawCount: inRange.length, spanDays };
+}
+
 async function renderWeights() {
   const [weights, s] = await Promise.all([syncWeightsJournal(), api("GET", "/api/settings")]);
   const todayStr = isoDate(new Date());
@@ -1281,6 +1343,13 @@ async function renderWeights() {
   const w7From = shiftDay(todayStr, -6);
   const w7List = weights.filter((w) => w.date >= w7From);
   const avg7 = w7List.length ? r1(w7List.reduce((acc, x) => acc + x.kg, 0) / w7List.length) : null;
+
+  const chartMode = state.weightChartMode || "days";
+  const chartDays = state.weightChartDays || 90;
+  const chartData = aggregateWeights(weights, chartMode, chartDays, todayStr);
+  const chartSummary = chartMode === "days"
+    ? `${chartData.rawCount} pesajes${chartData.spanDays ? ` · ${chartData.spanDays}d` : ""}`
+    : `${chartData.points.length} ${chartMode === "3d" ? "medias 3d" : "medias sem."} · ${chartData.rawCount} pesajes`;
 
   const daysCount = state.weightDays || 14;
   const dayRows = [];
@@ -1353,11 +1422,17 @@ async function renderWeights() {
     </div>
 
     <div class="card">
-      <div class="row between" style="margin-bottom:6px">
+      <div class="row between" style="margin-bottom:8px">
         <strong>${icon("chart", 16)} Curva de Peso</strong>
-        <span class="muted" style="font-size:.78rem">${weights.length} pesajes</span>
+        <span class="muted" style="font-size:.78rem">${chartSummary}</span>
       </div>
-      <div style="margin:8px 0">${lineChart(weights.slice(-90))}</div>
+      <div class="seg" style="margin-bottom:8px">
+        ${[["days", "Por días"], ["3d", "Media 3 días"], ["weeks", "Media semanal"]].map(([m, lbl]) => `<button type="button" class="${chartMode === m ? "on" : ""}" onclick="state.weightChartMode='${m}';renderWeights()">${lbl}</button>`).join("")}
+      </div>
+      <div class="seg" style="margin-bottom:10px">
+        ${[7, 14, 30, 90, 365].map((d) => `<button type="button" style="padding:5px 8px;font-size:.78rem" class="${chartDays === d ? "on" : ""}" onclick="state.weightChartDays=${d};renderWeights()">${d}d</button>`).join("")}
+      </div>
+      <div style="margin:6px 0">${lineChart(chartData.points)}</div>
     </div>
 
     <div class="row between" style="margin:18px 2px 8px">

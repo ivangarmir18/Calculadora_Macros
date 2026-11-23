@@ -49,7 +49,7 @@ function barChart(days, goal) {
 /** Línea de peso limpia, ultra rápida y sin sobrecargas. points: [{date,kg}] ascendente. */
 function lineChart(points) {
   const W = 340, H = 145, padL = 32, padR = 12, padT = 16, padB = 20;
-  if (!points || points.length < 2) return `<div class="empty small">Apunta al menos 2 pesos para ver la gráfica</div>`;
+  if (!points || points.length < 2) return `<div class="empty small">Se necesitan al menos 2 puntos en este periodo para ver la gráfica</div>`;
   const ts = points.map((p) => new Date(p.date).getTime());
   const t0 = Math.min(...ts), t1 = Math.max(...ts);
   const ks = points.map((p) => p.kg);
@@ -65,25 +65,27 @@ function lineChart(points) {
   const cid = "lc_" + Math.random().toString(36).slice(2, 8);
   const dots = pts.map((p, i) => {
     const pt = points[i];
+    const lbl = pt.label || pt.date;
     const prev = i > 0 ? points[i - 1].kg : null;
-    const diff = prev !== null ? (pt.kg - prev) : null;
+    const diff = prev !== null ? Math.round((pt.kg - prev) * 10) / 10 : null;
     const diffStr = diff !== null ? (diff > 0 ? `+${diff.toFixed(1)}` : diff.toFixed(1)) + " kg" : "";
-    return `<g class="chart-point-g" data-date="${pt.date}" data-kg="${pt.kg}" data-diff="${diffStr}" data-x="${p[0].toFixed(1)}" onmouseenter="chartPointHover(this)" onmouseleave="chartPointLeave(this)" onclick="chartPointClick(this)">
+    return `<g class="chart-point-g" data-date="${lbl}" data-kg="${pt.kg}" data-diff="${diffStr}" data-x="${p[0].toFixed(1)}" onmouseenter="chartPointHover(this)" onmouseleave="chartPointLeave(this)" onclick="chartPointClick(this)">
       <circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="10" fill="none" pointer-events="all" style="cursor:pointer;"/>
       <circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="3" fill="var(--accent)" class="chart-dot"/>
-      <title>${pt.date}: ${pt.kg} kg ${diffStr ? '(' + diffStr + ')' : ''}</title>
+      <title>${lbl}: ${pt.kg} kg ${diffStr ? '(' + diffStr + ')' : ''}</title>
     </g>`;
   }).join("");
 
   const d0 = points[0].date, d1 = points[points.length - 1].date;
   const lastPt = points[points.length - 1];
+  const lastLbl = lastPt.label || lastPt.date;
   const firstPt = points[0];
-  const totalChange = (lastPt.kg - firstPt.kg);
+  const totalChange = Math.round((lastPt.kg - firstPt.kg) * 10) / 10;
   const changeStr = (totalChange > 0 ? "+" : "") + totalChange.toFixed(1) + " kg";
 
-  return `<div class="chart-container" id="${cid}_wrap" data-last-date="${lastPt.date}" data-last-kg="${lastPt.kg}" data-last-diff="${changeStr} en periodo" data-last-good="${totalChange <= 0 ? '1' : '0'}">
+  return `<div class="chart-container" id="${cid}_wrap" data-last-date="${lastLbl}" data-last-kg="${lastPt.kg}" data-last-diff="${changeStr} en periodo" data-last-good="${totalChange <= 0 ? '1' : '0'}">
     <div class="chart-weight-bar" id="${cid}_bar">
-      <span class="cwb-date">${lastPt.date}</span>
+      <span class="cwb-date">${lastLbl}</span>
       <span class="cwb-dot">·</span>
       <strong class="cwb-kg">${lastPt.kg} kg</strong>
       <span class="cwb-diff ${totalChange <= 0 ? 'good' : 'warn'}">(${changeStr} en periodo)</span>
