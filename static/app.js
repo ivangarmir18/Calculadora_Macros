@@ -159,7 +159,7 @@ async function renderToday() {
       <button class="icon-btn" onclick="changeDay(-1)" aria-label="Día anterior">${icon("left", 22)}</button>
       <div class="date" onclick="pickDate()"><strong>${isToday ? "Hoy" : label}</strong><span class="muted">${isToday ? label : "Toca para cambiar de día"}</span></div>
       ${isToday ? "" : `<button class="chip on" onclick="state.date=isoDate(new Date());renderToday()">Hoy</button>`}
-      <a class="icon-btn" href="/report?date=${state.date}" target="_blank" title="Ver / Descargar informe PDF" aria-label="Informe PDF">${icon("download", 20)}</a>
+      <a class="icon-btn" href="/api/export/pdf?mode=meals&days=1&date=${state.date}" download="informe_dia_${state.date}.pdf" title="Descargar PDF del día (${state.date})" aria-label="Descargar PDF del día">${icon("download", 20)}</a>
       <button class="icon-btn" onclick="changeDay(1)" aria-label="Día siguiente">${icon("right", 22)}</button>
     </div>
     <div class="card">
@@ -1967,8 +1967,8 @@ async function renderSettings() {
     <h2>${icon("download", 15)} Copia de seguridad & Exportar</h2>
     <div class="card"><p class="muted" style="margin-top:0">Exporta tu informe nutricional en PDF, descarga tus copias en JSON o historial en CSV para Excel.</p>
       <div class="grid2" style="margin-bottom:8px">
-        <a class="btn primary" href="/report?date=${state.date}" target="_blank">${icon("download", 17)} Ver Informe PDF</a>
-        <a class="btn" href="/api/export/pdf?date=${state.date}" download>${icon("download", 17)} Descargar PDF</a>
+        <a class="btn primary" href="/report?date=${state.date}" target="_blank">${icon("eye", 17)} Ver Informe del Día</a>
+        <a class="btn" href="/api/export/pdf?mode=meals&days=1&date=${state.date}" download="informe_dia_${state.date}.pdf">${icon("download", 17)} Descargar PDF del Día</a>
       </div>
       <div class="grid2"><a class="btn" href="/api/export" download>${icon("download", 17)} Copia (.json)</a><a class="btn" href="/api/export.csv" download>${icon("download", 17)} Historial (.csv)</a></div>
       <button class="btn block" style="margin-top:8px" id="restore">${icon("upload", 17)} Restaurar copia…</button><input id="restoreFile" type="file" accept=".json,application/json" class="hidden"></div>

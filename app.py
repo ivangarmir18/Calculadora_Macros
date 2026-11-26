@@ -1169,6 +1169,7 @@ def export_pdf():
             pdf_bytes = pdf_report.generate_weekly_pdf(conn, target_date=target_date, weeks_count=weeks)
         resp = Response(pdf_bytes, mimetype="application/pdf")
         resp.headers["Content-Disposition"] = f'attachment; filename="informe_semanal_{weeks}semanas_{target_date}.pdf"'
+        resp.headers["Cache-Control"] = "no-store"
         return resp
 
     try:
@@ -1181,9 +1182,15 @@ def export_pdf():
             pdf_bytes = pdf_report.generate_meals_detail_pdf(
                 conn, target_date=target_date, days_range=days, start_date=start_date, end_date=end_date
             )
-        filename = f"informe_comidas_{start_date}_a_{end_date}.pdf" if (start_date and end_date) else f"informe_comidas_{days}dias_{target_date}.pdf"
+        if start_date and end_date:
+            filename = f"informe_comidas_{start_date}_a_{end_date}.pdf"
+        elif days == 1:
+            filename = f"informe_dia_{target_date}.pdf"
+        else:
+            filename = f"informe_comidas_{days}dias_{target_date}.pdf"
         resp = Response(pdf_bytes, mimetype="application/pdf")
         resp.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+        resp.headers["Cache-Control"] = "no-store"
         return resp
 
     with get_conn() as conn:
@@ -1193,6 +1200,7 @@ def export_pdf():
     filename = f"informe_proceso_{start_date}_a_{end_date}.pdf" if (start_date and end_date) else f"informe_proceso_{days}dias_{target_date}.pdf"
     resp = Response(pdf_bytes, mimetype="application/pdf")
     resp.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+    resp.headers["Cache-Control"] = "no-store"
     return resp
 
 

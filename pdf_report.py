@@ -8,7 +8,6 @@ from datetime import date, datetime, timedelta
 from fpdf import FPDF, XPos, YPos
 
 import db
-import gemini
 
 
 class MacroPDF(FPDF):
@@ -553,61 +552,50 @@ def generate_macro_pdf(conn, target_date=None, days_range=30, start_date=None, e
         "days_summary": days_summary_text,
     }
 
-    # Intentar obtener análisis con Gemini si la API key está disponible
-    ai_analysis = None
-    gemini_key, _ = gemini.get_gemini_api_key(conn)
-    gemini_model, _ = gemini.get_gemini_model(conn)
-    if gemini_key:
-        try:
-            ai_analysis = gemini.analyze_process_with_gemini(gemini_key, context_ai, preferred_model=gemini_model)
-        except Exception:
-            ai_analysis = None
-
-    # Fallback estadístico determinista si no hay Gemini o falló la conexión
-    if not ai_analysis or not isinstance(ai_analysis, dict):
-        if w_diff is not None and w_diff < 0:
-            v_title = "Evolución favorable con tendencia de pérdida de peso"
-            v_body = (
-                f"Durante los últimos {days_range} días has registrado un déficit acumulado de -{total_deficit:,.0f} kcal "
-                f"con una variación de peso de {w_diff_str} (de {w_start:.1f} kg a {w_end:.1f} kg). "
-                f"El ritmo de descenso coincide con el déficit energético mantenido. Las posibles subidas o bajadas puntuales entre días "
-                f"suelen deberse a fluctuaciones normales de agua corporal, retención de sodio o repleción de glucógeno muscular."
-            ).replace(",", ".")
-            v_tips = [
-                f"Mantén tu consumo proteico en torno a {goal_p:.0f}g diarios para preservar masa muscular durante el déficit.",
-                "Pésate siempre en las mismas condiciones (en ayunas al despertar y tras orinar) para reducir ruido en la báscula.",
-                "La constancia en los registros de fines de semana es clave para que el déficit real sea predecible."
-            ]
-        elif w_diff is not None and w_diff > 0:
-            v_title = "Fase de fluctuación temporal o ligero superávit"
-            v_body = (
-                f"El peso registrado ha variado en {w_diff_str} (de {w_start:.1f} kg a {w_end:.1f} kg) con un promedio de "
-                f"{avg_kcal:.0f} kcal/día frente a un objetivo de {goal_kcal:.0f} kcal. Si has entrenado con fuerza o aumentado "
-                f"hidratos de carbono, gran parte del incremento puede ser agua intramuscular (1g glucógeno retiene ~3g de agua)."
-            )
-            v_tips = [
-                f"Revisa condimentos y aliños como aceite de oliva (1 cucharada sopera aporta ~120 kcal de grasa).",
-                f"Intenta registrar al menos el 80% de los días para tener una lectura precisa del balance energético.",
-                "Evalúa la tendencia a 3-4 semanas en lugar de variaciones de 24-48 horas."
-            ]
-        else:
-            v_title = "Fase de mantenimiento o consolidación del peso"
-            v_body = (
-                f"En este periodo de {days_range} días has mantenido un promedio de {avg_kcal:.0f} kcal/día "
-                f"frente a un TDEE de {tdee:.0f} kcal. El peso se muestra estable. "
-                f"Para activar o acelerar la pérdida de grasa de forma controlada, sostener un déficit diario de 500-800 kcal "
-                f"permite reducir aproximadamente 0.5 a 0.8 kg de grasa por semana con máxima retención de masa magra."
-            )
-            v_tips = [
-                f"Asegura tu ingesta proteica diaria ({goal_p:.0f}g) para mantener la saciedad alta y tu masa magra protegida.",
-                "Apunta los pesos con frecuencia regular (al menos 3-4 días por semana) para detectar la tendencia real.",
-                "Aprovecha el asistente por voz para registrar ensaladas y platos combinados sin fricción."
-            ]
-        ai_analysis = {
-            "verdict": v_title,
-            "analysis": v_body,
-            "tips": v_tips
-        }
+    # Análisis estadístico determinista (instantáneo, sin llamadas externas)
+    if w_diff is not None and w_diff < 0:
+        v_title = "Evolución favorable con tendencia de pérdida de peso"
+        v_body = (
+            f"Durante los últimos {days_range} días has registrado un déficit acumulado de -{total_deficit:,.0f} kcal "
+            f"con una variación de peso de {w_diff_str} (de {w_start:.1f} kg a {w_end:.1f} kg). "
+            f"El ritmo de descenso coincide con el déficit energético mantenido. Las posibles subidas o bajadas puntuales entre días "
+            f"suelen deberse a fluctuaciones normales de agua corporal, retención de sodio o repleción de glucógeno muscular."
+        ).replace(",", ".")
+        v_tips = [
+            f"Mantén tu consumo proteico en torno a {goal_p:.0f}g diarios para preservar masa muscular durante el déficit.",
+            "Pésate siempre en las mismas condiciones (en ayunas al despertar y tras orinar) para reducir ruido en la báscula.",
+            "La constancia en los registros de fines de semana es clave para que el déficit real sea predecible."
+        ]
+    elif w_diff is not None and w_diff > 0:
+        v_title = "Fase de fluctuación temporal o ligero superávit"
+        v_body = (
+            f"El peso registrado ha variado en {w_diff_str} (de {w_start:.1f} kg a {w_end:.1f} kg) con un promedio de "
+            f"{avg_kcal:.0f} kcal/día frente a un objetivo de {goal_kcal:.0f} kcal. Si has entrenado con fuerza o aumentado "
+            f"hidratos de carbono, gran parte del incremento puede ser agua intramuscular (1g glucógeno retiene ~3g de agua)."
+        )
+        v_tips = [
+            f"Revisa condimentos y aliños como aceite de oliva (1 cucharada sopera aporta ~120 kcal de grasa).",
+            f"Intenta registrar al menos el 80% de los días para tener una lectura precisa del balance energético.",
+            "Evalúa la tendencia a 3-4 semanas en lugar de variaciones de 24-48 horas."
+        ]
+    else:
+        v_title = "Fase de mantenimiento o consolidación del peso"
+        v_body = (
+            f"En este periodo de {days_range} días has mantenido un promedio de {avg_kcal:.0f} kcal/día "
+            f"frente a un TDEE de {tdee:.0f} kcal. El peso se muestra estable. "
+            f"Para activar o acelerar la pérdida de grasa de forma controlada, sostener un déficit diario de 500-800 kcal "
+            f"permite reducir aproximadamente 0.5 a 0.8 kg de grasa por semana con máxima retención de masa magra."
+        )
+        v_tips = [
+            f"Asegura tu ingesta proteica diaria ({goal_p:.0f}g) para mantener la saciedad alta y tu masa magra protegida.",
+            "Apunta los pesos con frecuencia regular (al menos 3-4 días por semana) para detectar la tendencia real.",
+            "Aprovecha el asistente por voz para registrar ensaladas y platos combinados sin fricción."
+        ]
+    ai_analysis = {
+        "verdict": v_title,
+        "analysis": v_body,
+        "tips": v_tips
+    }
 
     # Salto de página si queda poco espacio para la sección de análisis
     if pdf.get_y() > 210:
@@ -616,8 +604,7 @@ def generate_macro_pdf(conn, target_date=None, days_range=30, start_date=None, e
     sec_y = pdf.get_y()
     pdf.set_font("helvetica", "B", 11)
     pdf.set_text_color(15, 23, 42)
-    ai_badge_text = " · Gemini AI Asesor Nutricional" if gemini_key else " · Análisis Fisiológico Clínico"
-    pdf.cell(0, 5, f"Análisis de Correlación: Comidas vs. Peso Corporal{ai_badge_text}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.cell(0, 5, "Análisis de Correlación: Comidas vs. Peso Corporal · Análisis Fisiológico Clínico", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.ln(1)
 
     box_start_y = pdf.get_y()
