@@ -29,15 +29,16 @@ function donutChart(p, c, f, size = 110) {
 /** Barras de kcal por día con línea de objetivo, interactividad y tolerancia (+10%). days: [{date,kcal}] ascendente. */
 function barChart(days, goal) {
   const W = 340, H = 150, padL = 4, padB = 18, padT = 8, n = days.length || 1;
-  const max = Math.max(goal * 1.15, ...days.map((d) => d.kcal), 1);
+  const max = Math.max(goal * 1.15, ...days.map((d) => Math.max(d.kcal, (d.goal || goal) * 1.15)), 1);
   const bw = (W - padL) / n, gap = Math.min(4, bw * 0.25);
   const y = (v) => padT + (H - padT - padB) * (1 - v / max);
   const bars = days.map((d, i) => {
+    const dg = d.goal || goal;
     const h = Math.max(0, (H - padT - padB) * (d.kcal / max));
-    const cls = d.kcal > goal * 1.10 ? "over" : d.kcal > 0 ? "ok" : "";
-    const diff = d.kcal - goal;
+    const cls = d.kcal > dg * 1.10 ? "over" : d.kcal > 0 ? "ok" : "";
+    const diff = d.kcal - dg;
     const diffStr = diff > 0 ? `+${Math.round(diff)} kcal` : `${Math.round(diff)} kcal`;
-    return `<rect class="bar-r ${cls}" x="${padL + i * bw + gap / 2}" y="${H - padB - h}" width="${Math.max(1, bw - gap)}" height="${h}" rx="${Math.min(4, bw / 3)}" data-date="${d.date}" data-kcal="${Math.round(d.kcal)}"><title>${d.date}: ${Math.round(d.kcal)} kcal (${diffStr} vs objetivo)</title></rect>`;
+    return `<rect class="bar-r ${cls}" x="${padL + i * bw + gap / 2}" y="${H - padB - h}" width="${Math.max(1, bw - gap)}" height="${h}" rx="${Math.min(4, bw / 3)}" data-date="${d.date}" data-kcal="${Math.round(d.kcal)}"><title>${d.date}: ${Math.round(d.kcal)} kcal (${diffStr} vs obj ${Math.round(dg)})</title></rect>`;
   }).join("");
   const step = Math.ceil(n / 6);
   const labels = days.map((d, i) => (i % step === 0 || i === n - 1) ? `<text x="${padL + i * bw + bw / 2}" y="${H - 4}" text-anchor="middle">${d.date.slice(8)}/${d.date.slice(5, 7)}</text>` : "").join("");

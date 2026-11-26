@@ -1667,7 +1667,7 @@ async function renderProgress() {
   const baseDate = state.date || isoDate(new Date());
   for (let i = n - 1; i >= 0; i--) {
     const dt = shiftDay(baseDate, -i);
-    series.push({ date: dt, kcal: byDate[dt]?.kcal || 0 });
+    series.push({ date: dt, kcal: byDate[dt]?.kcal || 0, goal: byDate[dt]?.goal_kcal || g.kcal });
   }
 
   const wFrom = shiftDay(baseDate, -Math.max(n, 30));
@@ -1676,11 +1676,15 @@ async function renderProgress() {
   const kc = a.protein * 4 + a.carbs * 4 + a.fat * 9;
   const share = (v) => kc ? Math.round(v / kc * 100) : 0;
 
+  const planBal = tdee - g.kcal;
+  const planBadge = planBal >= 0 ? `Déficit -${r0(planBal)} kcal/día` : `Superávit +${r0(Math.abs(planBal))} kcal/día`;
+  const phases = h.goal_history || [];
+
   $("#view").innerHTML = `<h1>Progreso & Déficit</h1>
     <div class="bio-card">
       <div class="row between">
         <strong>${icon("target", 16)} Balance Biométrico Diario</strong>
-        <span class="combo-badge" style="background:var(--accent);color:var(--accent-ink)">Déficit -${r0(tdee - g.kcal)} kcal/día</span>
+        <span class="combo-badge" style="background:var(--accent);color:var(--accent-ink)">${planBadge}</span>
       </div>
       <div class="bio-grid">
         <div class="bio-item"><div class="lbl">Gasto Diario (TDEE)</div><div class="val">${r0(tdee)} kcal</div></div>
@@ -1744,10 +1748,33 @@ async function renderProgress() {
         <button class="btn primary" id="saveW">${icon("check", 18)}</button></div>
     </div>
 
+    ${phases.length ? `
+    <h2>${icon("target", 15)} Fases de Objetivos, Macros y TDEE</h2>
+    <div class="card" style="padding:10px 14px;margin-bottom:14px">
+      <div class="muted" style="font-size:.78rem;margin-bottom:8px">Cada día y cada PDF antiguo conserva el objetivo que tenías en esa fecha.</div>
+      ${phases.map((ph, idx) => {
+        const bal = ph.tdee - ph.kcal;
+        const balStr = bal >= 0 ? `Déficit -${r0(bal)}` : `Superávit +${r0(Math.abs(bal))}`;
+        return `<div class="row between" style="padding:7px 0;${idx < phases.length - 1 ? "border-bottom:1px solid var(--line);" : ""}gap:8px;flex-wrap:wrap">
+          <div>
+            <strong style="font-size:.9rem">Desde ${esc(ph.effective_date)}</strong>
+            ${idx === 0 ? `<span class="combo-badge" style="margin-left:6px;background:var(--accent);color:var(--accent-ink)">Vigente</span>` : ""}
+            ${ph.note ? `<span class="muted" style="font-size:.8rem"> · ${esc(ph.note)}</span>` : ""}
+          </div>
+          <div style="font-size:.82rem;text-align:right">
+            <b>${r0(ph.kcal)} kcal</b> · ${r0(ph.protein)}P / ${r0(ph.carbs)}C / ${r0(ph.fat)}G · <span class="muted">TDEE ${r0(ph.tdee)} (${balStr})</span>
+          </div>
+        </div>`;
+      }).join("")}
+    </div>` : ""}
+
     <h2>${icon("home", 15)} Por días</h2>
-    ${h.days.map((d) => `<div class="item" onclick="state.date='${d.date}';go('today')"><div class="grow">
-      <div class="row between"><div class="title" style="text-transform:capitalize">${parseISO(d.date).toLocaleDateString("es-ES", { weekday: "short", day: "numeric", month: "short" })}</div><div class="kcal-tag">${r0(d.kcal)}<small>kcal</small></div></div>
-      ${macroLine(d)}<div class="bar ${d.kcal > g.kcal ? "over" : ""}"><i style="width:${Math.min(100, d.kcal / g.kcal * 100)}%;background:var(--kcal)"></i></div></div></div>`).join("") || emptyBox("chart", "Sin registros en este periodo.")}`;
+    ${h.days.map((d) => {
+      const dg = d.goal_kcal || g.kcal;
+      return `<div class="item" onclick="state.date='${d.date}';go('today')"><div class="grow">
+      <div class="row between"><div class="title" style="text-transform:capitalize">${parseISO(d.date).toLocaleDateString("es-ES", { weekday: "short", day: "numeric", month: "short" })}</div><div class="kcal-tag">${r0(d.kcal)}<small> / ${r0(dg)} kcal</small></div></div>
+      ${macroLine(d)}<div class="bar ${d.kcal > dg * 1.10 ? "over" : ""}"><i style="width:${Math.min(100, d.kcal / (dg || 1) * 100)}%;background:var(--kcal)"></i></div></div></div>`;
+    }).join("") || emptyBox("chart", "Sin registros en este periodo.")}`;
 
   $("#saveW").onclick = async () => { const kg = toNum($("#wk").value); if (!kg) return toast("Escribe tu peso"); await api("POST", "/api/weights", { date: isoDate(new Date()), kg }); toast("Peso guardado", true); renderProgress(); };
 }
@@ -1858,11 +1885,21 @@ async function renderSettings() {
 
     <h2>${icon("target", 15)} Mis objetivos diarios & Biometría</h2>
     <div class="card">
+      <div class="note" style="margin-bottom:12px">
+        ${icon("info", 18)}
+        <div>
+          <b>Tus cambios no alteran el pasado:</b> al guardar con una fecha de inicio, los días y PDFs anteriores a esa fecha conservan los objetivos, macros y TDEE que tenías entonces.
+        </div>
+      </div>
       <div class="grid2">
         <div><label style="margin-top:0">Kcal Objetivo</label><input id="g_kcal" inputmode="decimal" value="${g.kcal}"></div>
         <div><label style="margin-top:0">Proteína (g)</label><input id="g_protein" inputmode="decimal" value="${g.protein}"></div>
         <div><label>Hidratos (g)</label><input id="g_carbs" inputmode="decimal" value="${g.carbs}"></div>
         <div><label>Grasa (g)</label><input id="g_fat" inputmode="decimal" value="${g.fat}"></div>
+      </div>
+      <div class="grid2" style="margin-top:8px">
+        <div><label style="margin-top:0">Aplicar desde fecha</label><input id="g_eff_date" type="date" value="${isoDate(new Date())}"></div>
+        <div><label style="margin-top:0">Etiqueta / Fase (opcional)</label><input id="g_note" placeholder="Ej. Ajuste macros, Volumen..." value=""></div>
       </div>
       <h2 style="margin:16px 0 6px">${icon("gauge", 14)} Datos Biométricos</h2>
       <div class="grid3">
@@ -1870,7 +1907,30 @@ async function renderSettings() {
         <div><label style="margin-top:0">Peso actual (kg)</label><input id="p_weight" inputmode="decimal" value="${p.weight || lastW || 119}"></div>
         <div><label style="margin-top:0">Masa Magra LBM (kg)</label><input id="p_lbm" inputmode="decimal" value="${p.lbm || 85.5}"></div>
       </div>
-      <button class="btn primary block" style="margin-top:14px" id="saveGoals">${icon("check", 18)} Guardar objetivos y perfil</button>
+      <div id="goalLivePreview" class="muted" style="font-size:.82rem;margin-top:10px;padding:8px 10px;border-radius:10px;background:var(--bg)"></div>
+      <button class="btn primary block" style="margin-top:12px" id="saveGoals">${icon("check", 18)} Guardar objetivos y perfil</button>
+
+      ${(s.goal_history && s.goal_history.length) ? `
+      <h2 style="margin:18px 0 8px">${icon("chart", 14)} Historial de Objetivos, Macros y TDEE</h2>
+      <div style="border-top:1px solid var(--line)">
+        ${s.goal_history.map((ph, idx) => {
+          const bal = ph.tdee - ph.kcal;
+          const balStr = bal >= 0 ? `Déficit -${r0(bal)} kcal` : `Superávit +${r0(Math.abs(bal))} kcal`;
+          return `<div class="row between" style="padding:8px 0;border-bottom:1px solid var(--line);gap:8px">
+            <div class="grow">
+              <div>
+                <strong>Desde ${esc(ph.effective_date)}</strong>
+                ${idx === 0 ? `<span class="combo-badge" style="margin-left:6px;background:var(--accent);color:var(--accent-ink)">Actual</span>` : ""}
+                ${ph.note ? `<span class="muted" style="font-size:.8rem"> · ${esc(ph.note)}</span>` : ""}
+              </div>
+              <div class="muted" style="font-size:.8rem;margin-top:2px">
+                <b>${r0(ph.kcal)} kcal</b> · ${r0(ph.protein)}g P / ${r0(ph.carbs)}g C / ${r0(ph.fat)}g G · TDEE ${r0(ph.tdee)} (${balStr})
+              </div>
+            </div>
+            ${s.goal_history.length > 1 ? `<button type="button" class="icon-btn ghost del-phase" data-date="${esc(ph.effective_date)}" style="color:var(--danger);width:32px;height:32px" title="Eliminar esta fase">${icon("trash", 15)}</button>` : ""}
+          </div>`;
+        }).join("")}
+      </div>` : ""}
     </div>
 
     <h2>${icon("calc", 15)} Calculadora de macros</h2>
@@ -1917,6 +1977,17 @@ async function renderSettings() {
 
   $$("#themeSeg button").forEach((b) => b.onclick = () => setTheme(b.dataset.t));
   $$("#c_sex button").forEach((b) => b.onclick = () => { $$("#c_sex button").forEach((x) => x.classList.remove("on")); b.classList.add("on"); });
+  const updateGoalPreview = () => {
+    const gk = toNum($("#g_kcal").value), gp = toNum($("#g_protein").value), gc = toNum($("#g_carbs").value), gf = toNum($("#g_fat").value);
+    const td = toNum($("#p_tdee").value || 3000);
+    const macroKcal = r0(gp * 4 + gc * 4 + gf * 9);
+    const bal = td - gk;
+    const balTxt = bal >= 0 ? `<b style="color:var(--accent)">Déficit planificado: -${r0(bal)} kcal/día</b>` : `<b style="color:var(--c)">Superávit (Volumen): +${r0(Math.abs(bal))} kcal/día</b>`;
+    $("#goalLivePreview").innerHTML = `Suma de macros: <b>${macroKcal} kcal</b> (objetivo: ${r0(gk)} kcal) · ${balTxt}`;
+  };
+  ["#g_kcal", "#g_protein", "#g_carbs", "#g_fat", "#p_tdee"].forEach((sel) => $(sel)?.addEventListener("input", updateGoalPreview));
+  updateGoalPreview();
+
   $("#saveGoals").onclick = async () => {
     const goals = Object.fromEntries(["kcal", "protein", "carbs", "fat"].map((k) => [k, toNum($("#g_" + k).value)]));
     const profile = {
@@ -1925,9 +1996,21 @@ async function renderSettings() {
       weight: toNum($("#p_weight")?.value || 119),
       lbm: toNum($("#p_lbm")?.value || 85.5),
     };
-    await api("PUT", "/api/settings", { goals, profile });
-    toast("Objetivos y perfil biométrico guardados", true);
+    const effective_date = $("#g_eff_date")?.value || isoDate(new Date());
+    const note = ($("#g_note")?.value || "").trim();
+    await api("PUT", "/api/settings", { goals, profile, effective_date, note });
+    toast(`Objetivos guardados desde el ${effective_date}`, true);
+    renderSettings();
   };
+  $$(".del-phase").forEach((btn) => {
+    btn.onclick = async () => {
+      const dt = btn.dataset.date;
+      if (!confirm(`¿Eliminar la fase de objetivos del ${dt}?`)) return;
+      await api("DELETE", `/api/goals/history/${dt}`);
+      toast("Fase eliminada");
+      renderSettings();
+    };
+  });
   $("#saveGhToken")?.addEventListener("click", async () => {
     const t = $("#gh_token").value.trim();
     if (!t) return toast("Pega un token de GitHub válido");

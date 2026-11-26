@@ -259,8 +259,15 @@ def get_day(day):
     github_sync.maybe_periodic_pull()
     with get_conn() as conn:
         entries = rows(conn.execute("SELECT * FROM entries WHERE date=? ORDER BY time, id", (day,)))
-        tdee = float(get_setting(conn, "profile_tdee", "3000"))
-        return jsonify(date=day, entries=entries, totals=totals(entries), goals=get_goals(conn), tdee=tdee)
+        g = db.get_goals_for_date(conn, day)
+        return jsonify(
+            date=day,
+            entries=entries,
+            totals=totals(entries),
+            goals={"kcal": g["kcal"], "protein": g["protein"], "carbs": g["carbs"], "fat": g["fat"]},
+            tdee=g["tdee"],
+            goal_phase={"effective_date": g["effective_date"], "note": g["note"]},
+        )
 
 
 # ----------------------------------------------------------------- entradas
@@ -423,14 +430,23 @@ def history():
             end = date.today().isoformat()
 
         data = rows(conn.execute(sql, params))
+        for r in data:
+            dg = db.get_goals_for_date(conn, r["date"])
+            r["goal_kcal"] = dg["kcal"]
+            r["goal_protein"] = dg["protein"]
+            r["goal_carbs"] = dg["carbs"]
+            r["goal_fat"] = dg["fat"]
+            r["tdee"] = dg["tdee"]
+        end_g = db.get_goals_for_date(conn, end)
         avg = {k: round(sum(r[k] for r in data) / len(data), 1) if data else 0
                for k in ("kcal", "protein", "carbs", "fat")}
         return jsonify(
             days=data,
             average=avg,
             logged_days=len(data),
-            goals=get_goals(conn),
-            tdee=tdee,
+            goals={"kcal": end_g["kcal"], "protein": end_g["protein"], "carbs": end_g["carbs"], "fat": end_g["fat"]},
+            tdee=end_g["tdee"],
+            goal_history=db.list_goal_history(conn),
             start_date=start,
             end_date=end,
         )
@@ -794,8 +810,11 @@ def delete_preset(pid):
 @app.get("/api/settings")
 def get_settings():
     with get_conn() as conn:
-        return jsonify(goals=get_goals(conn),
-                       profile={k: get_setting(conn, f"profile_{k}") for k in PROFILE_KEYS})
+        return jsonify(
+            goals=get_goals(conn),
+            profile={k: get_setting(conn, f"profile_{k}") for k in PROFILE_KEYS},
+            goal_history=db.list_goal_history(conn),
+        )
 
 
 @app.put("/api/settings")
@@ -808,7 +827,44 @@ def put_settings():
         for k, v in (d.get("profile") or {}).items():
             if k in PROFILE_KEYS:
                 set_setting(conn, f"profile_{k}", str(v)[:20])
-    return jsonify(ok=True)
+        if d.get("goals") or (d.get("profile") and "tdee" in d["profile"]):
+            eff_date = valid_date(d.get("effective_date") or date.today().isoformat())
+            note = str(d.get("note") or "").strip()[:80]
+            cur_g = get_goals(conn)
+            cur_tdee = float(get_setting(conn, "profile_tdee", "3000"))
+            db.upsert_goal_history(
+                conn,
+                eff_date,
+                cur_g["kcal"],
+                cur_g["protein"],
+                cur_g["carbs"],
+                cur_g["fat"],
+                cur_tdee,
+                note,
+            )
+            # Sincronizar settings con la fase vigente hoy
+            today_g = db.get_goals_for_date(conn, date.today().isoformat())
+            for k in ("kcal", "protein", "carbs", "fat"):
+                set_setting(conn, f"goal_{k}", today_g[k])
+            set_setting(conn, "profile_tdee", today_g["tdee"])
+        hist = db.list_goal_history(conn)
+    return jsonify(ok=True, goal_history=hist)
+
+
+@app.delete("/api/goals/history/<eff_date>")
+def delete_goal_history(eff_date):
+    valid_date(eff_date)
+    with get_conn() as conn:
+        cnt = conn.execute("SELECT COUNT(*) FROM goal_history").fetchone()[0]
+        if cnt <= 1:
+            abort(400, "Debe quedar al menos un objetivo base en el historial")
+        conn.execute("DELETE FROM goal_history WHERE effective_date=?", (eff_date,))
+        today_g = db.get_goals_for_date(conn, date.today().isoformat())
+        for k in ("kcal", "protein", "carbs", "fat"):
+            set_setting(conn, f"goal_{k}", today_g[k])
+        set_setting(conn, "profile_tdee", today_g["tdee"])
+        hist = db.list_goal_history(conn)
+    return jsonify(ok=True, goal_history=hist)
 
 
 # ------------------------------------------------------------- Asistente Gemini (IA)

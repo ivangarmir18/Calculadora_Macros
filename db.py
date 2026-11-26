@@ -66,6 +66,16 @@ CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS goal_history (
+    effective_date TEXT PRIMARY KEY,      -- YYYY-MM-DD (vigente desde esta fecha inclusive)
+    kcal           REAL NOT NULL,
+    protein        REAL NOT NULL,
+    carbs          REAL NOT NULL,
+    fat            REAL NOT NULL,
+    tdee           REAL NOT NULL DEFAULT 3000,
+    note           TEXT DEFAULT ''
+);
 """
 
 # Objetivos base y datos biométricos por defecto
@@ -268,6 +278,78 @@ def create_backup(label: str = "auto") -> Path | None:
         return None
 
 
+def get_goals_for_date(conn, day_str: str) -> dict:
+    """Devuelve {effective_date, kcal, protein, carbs, fat, tdee, note} vigentes en `day_str`."""
+    try:
+        row = conn.execute(
+            "SELECT effective_date, kcal, protein, carbs, fat, tdee, note "
+            "FROM goal_history WHERE effective_date <= ? ORDER BY effective_date DESC LIMIT 1",
+            (day_str,),
+        ).fetchone()
+        if not row:
+            row = conn.execute(
+                "SELECT effective_date, kcal, protein, carbs, fat, tdee, note "
+                "FROM goal_history ORDER BY effective_date ASC LIMIT 1"
+            ).fetchone()
+        if row:
+            return {
+                "effective_date": row[0],
+                "kcal": float(row[1]),
+                "protein": float(row[2]),
+                "carbs": float(row[3]),
+                "fat": float(row[4]),
+                "tdee": float(row[5]),
+                "note": row[6] or "",
+            }
+    except sqlite3.OperationalError:
+        pass
+    s_map = {r[0]: r[1] for r in conn.execute("SELECT key, value FROM settings").fetchall()}
+    return {
+        "effective_date": "2026-01-01",
+        "kcal": float(s_map.get("goal_kcal", DEFAULT_SETTINGS["goal_kcal"])),
+        "protein": float(s_map.get("goal_protein", DEFAULT_SETTINGS["goal_protein"])),
+        "carbs": float(s_map.get("goal_carbs", DEFAULT_SETTINGS["goal_carbs"])),
+        "fat": float(s_map.get("goal_fat", DEFAULT_SETTINGS["goal_fat"])),
+        "tdee": float(s_map.get("profile_tdee", DEFAULT_SETTINGS["profile_tdee"])),
+        "note": "",
+    }
+
+
+def list_goal_history(conn) -> list[dict]:
+    """Lista todas las fases de objetivos ordenadas de la más reciente a la más antigua."""
+    try:
+        rows = conn.execute(
+            "SELECT effective_date, kcal, protein, carbs, fat, tdee, note "
+            "FROM goal_history ORDER BY effective_date DESC"
+        ).fetchall()
+        return [
+            {
+                "effective_date": r[0],
+                "kcal": float(r[1]),
+                "protein": float(r[2]),
+                "carbs": float(r[3]),
+                "fat": float(r[4]),
+                "tdee": float(r[5]),
+                "note": r[6] or "",
+            }
+            for r in rows
+        ]
+    except sqlite3.OperationalError:
+        return []
+
+
+def upsert_goal_history(conn, effective_date: str, kcal: float, protein: float, carbs: float, fat: float, tdee: float, note: str = ""):
+    """Crea o actualiza los objetivos y TDEE vigentes a partir de `effective_date`."""
+    conn.execute(
+        "INSERT INTO goal_history(effective_date, kcal, protein, carbs, fat, tdee, note) "
+        "VALUES (?,?,?,?,?,?,?) "
+        "ON CONFLICT(effective_date) DO UPDATE SET "
+        "kcal=excluded.kcal, protein=excluded.protein, carbs=excluded.carbs, "
+        "fat=excluded.fat, tdee=excluded.tdee, note=excluded.note",
+        (effective_date, float(kcal), float(protein), float(carbs), float(fat), float(tdee), (note or "").strip()),
+    )
+
+
 def init_db():
     global _in_init
     _in_init = True
@@ -299,6 +381,22 @@ def init_db():
             for k, v in DEFAULT_SETTINGS.items():
                 conn.execute("INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)", (k, v))
             conn.execute("UPDATE settings SET value='3000' WHERE key='profile_tdee' AND value='3350'")
+
+            # Si goal_history está vacío, inicializarlo con los objetivos actuales desde 2026-01-01
+            if conn.execute("SELECT COUNT(*) FROM goal_history").fetchone()[0] == 0:
+                s_map = {r[0]: r[1] for r in conn.execute("SELECT key, value FROM settings").fetchall()}
+                conn.execute(
+                    "INSERT INTO goal_history(effective_date, kcal, protein, carbs, fat, tdee, note) VALUES (?,?,?,?,?,?,?)",
+                    (
+                        "2026-01-01",
+                        float(s_map.get("goal_kcal", DEFAULT_SETTINGS["goal_kcal"])),
+                        float(s_map.get("goal_protein", DEFAULT_SETTINGS["goal_protein"])),
+                        float(s_map.get("goal_carbs", DEFAULT_SETTINGS["goal_carbs"])),
+                        float(s_map.get("goal_fat", DEFAULT_SETTINGS["goal_fat"])),
+                        float(s_map.get("profile_tdee", DEFAULT_SETTINGS["profile_tdee"])),
+                        "Objetivo inicial",
+                    ),
+                )
 
             # Sembrar alimentos base solo si no se han sembrado antes (o si la tabla está vacía)
             foods_count = conn.execute("SELECT COUNT(*) FROM foods").fetchone()[0]

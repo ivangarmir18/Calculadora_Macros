@@ -409,6 +409,41 @@ class ApiTest(unittest.TestCase):
         self.assertIn("2026-10-11", csv_r.data.decode("utf-8"))
         self.assertNotIn("2026-10-15", csv_r.data.decode("utf-8"))
 
+    def test_goal_history_date_effective(self):
+        # Guardar nuevo objetivo desde 2026-11-26 (sin tocar días anteriores)
+        r = self.c.put("/api/settings", json={
+            "goals": {"kcal": 2700, "protein": 190, "carbs": 350, "fat": 60},
+            "profile": {"tdee": 2900},
+            "effective_date": "2026-11-26",
+            "note": "Volumen",
+        })
+        self.assertEqual(r.status_code, 200)
+        hist = r.get_json()["goal_history"]
+        self.assertGreaterEqual(len(hist), 2)
+
+        # Un día anterior conserva los objetivos iniciales (2150 kcal, 185P, TDEE 3000)
+        d_old = self.c.get("/api/day/2026-11-20").get_json()
+        self.assertEqual(d_old["goals"]["kcal"], 2150.0)
+        self.assertEqual(d_old["goals"]["protein"], 185.0)
+        self.assertEqual(d_old["tdee"], 3000.0)
+
+        # Desde 2026-11-26 inclusive aplica el nuevo objetivo
+        d_new = self.c.get("/api/day/2026-11-26").get_json()
+        self.assertEqual(d_new["goals"]["kcal"], 2700.0)
+        self.assertEqual(d_new["goals"]["protein"], 190.0)
+        self.assertEqual(d_new["tdee"], 2900.0)
+
+        # PDF de un periodo antiguo conserva el objetivo antiguo
+        pdf_old = self.c.get("/api/export/pdf?start_date=2026-11-10&end_date=2026-11-20")
+        self.assertEqual(pdf_old.status_code, 200)
+        self.assertTrue(pdf_old.data.startswith(b"%PDF"))
+
+        # Eliminar la fase añadida vuelve a dejar el historial intacto
+        del_r = self.c.delete("/api/goals/history/2026-11-26")
+        self.assertEqual(del_r.status_code, 200)
+        d_reverted = self.c.get("/api/day/2026-11-26").get_json()
+        self.assertEqual(d_reverted["goals"]["kcal"], 2150.0)
+
 
 if __name__ == "__main__":
     unittest.main()

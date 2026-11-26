@@ -7,6 +7,7 @@ import io
 from datetime import date, datetime, timedelta
 from fpdf import FPDF, XPos, YPos
 
+import db
 import gemini
 
 
@@ -36,22 +37,9 @@ def generate_macro_pdf(conn, target_date=None, days_range=30, start_date=None, e
     target_date_obj = datetime.strptime(target_date, "%Y-%m-%d").date()
     now_str = datetime.now().strftime("%d/%m/%Y %H:%M")
 
-    # Leer settings y objetivos
+    # Leer settings y objetivos (resolviendo por fecha para respetar histórico)
     settings_rows = conn.execute("SELECT key, value FROM settings").fetchall()
     settings = {r["key"]: r["value"] for r in settings_rows}
-
-    goal_kcal = float(settings.get("goal_kcal", "2150"))
-    goal_p = float(settings.get("goal_protein", "185"))
-    goal_c = float(settings.get("goal_carbs", "200"))
-    goal_f = float(settings.get("goal_fat", "65"))
-
-    tdee = float(settings.get("profile_tdee", "3000"))
-    weight = float(settings.get("profile_weight", "119"))
-    lbm = float(settings.get("profile_lbm", "85.5"))
-    fat_mass = max(0.0, weight - lbm)
-    fat_pct = (fat_mass / weight * 100.0) if weight > 0 else 0.0
-    planned_deficit = tdee - goal_kcal
-    prot_per_lbm = (goal_p / lbm) if lbm > 0 else 0.0
 
     if start_date and end_date:
         start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
@@ -63,6 +51,20 @@ def generate_macro_pdf(conn, target_date=None, days_range=30, start_date=None, e
     else:
         start_dt = target_date_obj - timedelta(days=days_range - 1)
         date_strs = [(start_dt + timedelta(days=i)).isoformat() for i in range(days_range)]
+
+    end_goals = db.get_goals_for_date(conn, date_strs[-1])
+    goal_kcal = end_goals["kcal"]
+    goal_p = end_goals["protein"]
+    goal_c = end_goals["carbs"]
+    goal_f = end_goals["fat"]
+
+    tdee = end_goals["tdee"]
+    weight = float(settings.get("profile_weight", "119"))
+    lbm = float(settings.get("profile_lbm", "85.5"))
+    fat_mass = max(0.0, weight - lbm)
+    fat_pct = (fat_mass / weight * 100.0) if weight > 0 else 0.0
+    planned_deficit = tdee - goal_kcal
+    prot_per_lbm = (goal_p / lbm) if lbm > 0 else 0.0
 
     # Consultar entradas agregadas por día
     entries_sql = """
@@ -88,11 +90,12 @@ def generate_macro_pdf(conn, target_date=None, days_range=30, start_date=None, e
         for r in conn.execute(weights_sql, (date_strs[0], date_strs[-1])).fetchall()
     }
 
-    # Combinar información por día
+    # Combinar información por día con el objetivo/TDEE vigente en cada fecha
     period_days = []
     for dt in date_strs:
         ent = entries_by_date.get(dt, {"kcal": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0, "n_items": 0})
         w_kg = weights_by_date.get(dt)
+        dg = db.get_goals_for_date(conn, dt)
         period_days.append({
             "date": dt,
             "kcal": ent["kcal"],
@@ -101,6 +104,8 @@ def generate_macro_pdf(conn, target_date=None, days_range=30, start_date=None, e
             "fat": ent["fat"],
             "has_data": ent["kcal"] > 0 or ent["n_items"] > 0,
             "weight": w_kg,
+            "goal_kcal": dg["kcal"],
+            "tdee": dg["tdee"],
         })
 
     # Estadísticas del periodo
@@ -114,8 +119,8 @@ def generate_macro_pdf(conn, target_date=None, days_range=30, start_date=None, e
     avg_f = (sum(d["fat"] for d in logged_days_list) / n_logged) if n_logged > 0 else 0.0
 
     total_kcal_period = sum(d["kcal"] for d in logged_days_list)
-    # Déficit total acumulado en los días registrados
-    total_deficit = sum((tdee - d["kcal"]) for d in logged_days_list)
+    # Déficit total acumulado en los días registrados (usando el TDEE vigente cada día)
+    total_deficit = sum((d["tdee"] - d["kcal"]) for d in logged_days_list)
     fat_loss_est_kg = total_deficit / 7700.0 if total_deficit > 0 else 0.0
 
     # Crear documento PDF
@@ -307,8 +312,9 @@ def generate_macro_pdf(conn, target_date=None, days_range=30, start_date=None, e
         if k > 0:
             bh = max(1.5, (k / max_y) * inner_h)
             by = bottom_y - bh
+            day_goal = d.get("goal_kcal", goal_kcal)
             # Color de barra: Verde si en objetivo o en margen de tolerancia (+10%), Rojo si superó con exceso
-            if k <= goal_kcal * 1.10:
+            if k <= day_goal * 1.10:
                 pdf.set_fill_color(16, 185, 129)  # Verde esmeralda (en rango / tolerancia)
                 pdf.set_draw_color(13, 148, 136)
             else:
@@ -415,7 +421,7 @@ def generate_macro_pdf(conn, target_date=None, days_range=30, start_date=None, e
 
         if d["has_data"]:
             kcal_str = f"{d['kcal']:.0f}"
-            def_val = tdee - d["kcal"]
+            def_val = d.get("tdee", tdee) - d["kcal"]
             def_str = f"-{def_val:.0f} kcal" if def_val > 0 else f"+{abs(def_val):.0f} kcal"
             p_str = f"{d['protein']:.1f}"
             c_str = f"{d['carbs']:.1f}"
@@ -443,13 +449,15 @@ def generate_macro_pdf(conn, target_date=None, days_range=30, start_date=None, e
         pdf.cell(col_w[2], row_h, "", border=1, fill=fill)
 
         # Dibujar barra dentro
+        day_goal = d.get("goal_kcal", goal_kcal)
+        day_tdee = d.get("tdee", tdee)
         if d["has_data"] and d["kcal"] > 0:
             bar_track_w = col_w[2] - 4
-            bar_fill_w = min(bar_track_w, (d["kcal"] / goal_kcal) * bar_track_w)
+            bar_fill_w = min(bar_track_w, (d["kcal"] / (day_goal or 1)) * bar_track_w)
             pdf.set_fill_color(226, 232, 240)
             pdf.rect(cur_x + 2, cur_y + 1.2, bar_track_w, 2.8, "F")
             # Color de progreso (tolerancia del 10%)
-            if d["kcal"] <= goal_kcal * 1.10:
+            if d["kcal"] <= day_goal * 1.10:
                 pdf.set_fill_color(16, 185, 129)
             else:
                 pdf.set_fill_color(239, 68, 68)
@@ -457,7 +465,7 @@ def generate_macro_pdf(conn, target_date=None, days_range=30, start_date=None, e
 
         # Celda 3: Déficit
         pdf.set_xy(cur_x + col_w[2], cur_y)
-        if d["has_data"] and (tdee - d["kcal"]) > 0:
+        if d["has_data"] and (day_tdee - d["kcal"]) > 0:
             pdf.set_text_color(16, 185, 129)
         elif d["has_data"]:
             pdf.set_text_color(239, 68, 68)
@@ -676,11 +684,12 @@ def compute_weekly_summary(conn, target_date=None, weeks_count=12):
 
     settings_rows = conn.execute("SELECT key, value FROM settings").fetchall()
     settings = {r["key"]: r["value"] for r in settings_rows}
-    goal_kcal = float(settings.get("goal_kcal", "2150"))
-    goal_p = float(settings.get("goal_protein", "185"))
-    goal_c = float(settings.get("goal_carbs", "200"))
-    goal_f = float(settings.get("goal_fat", "65"))
-    tdee = float(settings.get("profile_tdee", "3000"))
+    end_g = db.get_goals_for_date(conn, target_date)
+    goal_kcal = end_g["kcal"]
+    goal_p = end_g["protein"]
+    goal_c = end_g["carbs"]
+    goal_f = end_g["fat"]
+    tdee = end_g["tdee"]
     weight = float(settings.get("profile_weight", "119"))
     lbm = float(settings.get("profile_lbm", "85.5"))
 
@@ -722,8 +731,9 @@ def compute_weekly_summary(conn, target_date=None, weeks_count=12):
         for d_off in range(7):
             d_str = (w_start + timedelta(days=d_off)).isoformat()
             if d_str in entries_by_date:
-                ent = entries_by_date[d_str]
+                ent = dict(entries_by_date[d_str])
                 if ent["kcal"] > 0 or ent["n_items"] > 0:
+                    ent["tdee"] = db.get_goals_for_date(conn, d_str)["tdee"]
                     day_list.append(ent)
                     all_logged_days.append(ent)
             if d_str in weights_by_date:
@@ -736,8 +746,8 @@ def compute_weekly_summary(conn, target_date=None, weeks_count=12):
             avg_pr = round(sum(x["protein"] for x in day_list) / n_days, 1)
             avg_cb = round(sum(x["carbs"] for x in day_list) / n_days, 1)
             avg_ft = round(sum(x["fat"] for x in day_list) / n_days, 1)
-            tot_def = round(sum(tdee - x["kcal"] for x in day_list), 0)
-            avg_def = round(tdee - avg_k, 0)
+            tot_def = round(sum(x["tdee"] - x["kcal"] for x in day_list), 0)
+            avg_def = round(tot_def / n_days, 0)
         else:
             avg_k = avg_pr = avg_cb = avg_ft = tot_def = avg_def = 0.0
 
@@ -772,7 +782,7 @@ def compute_weekly_summary(conn, target_date=None, weeks_count=12):
     g_avg_p = round(sum(x["protein"] for x in all_logged_days) / total_logged, 1) if total_logged else 0.0
     g_avg_c = round(sum(x["carbs"] for x in all_logged_days) / total_logged, 1) if total_logged else 0.0
     g_avg_f = round(sum(x["fat"] for x in all_logged_days) / total_logged, 1) if total_logged else 0.0
-    g_tot_def = round(sum(tdee - x["kcal"] for x in all_logged_days), 0)
+    g_tot_def = round(sum(x["tdee"] - x["kcal"] for x in all_logged_days), 0)
     g_fat_loss_kg = round(g_tot_def / 7700.0, 2) if g_tot_def > 0 else 0.0
 
     start_w = all_weights_in_period[0][1] if all_weights_in_period else None
@@ -1031,11 +1041,12 @@ def generate_meals_detail_pdf(conn, target_date=None, days_range=30, start_date=
     settings_rows = conn.execute("SELECT key, value FROM settings").fetchall()
     settings = {r["key"]: r["value"] for r in settings_rows}
 
-    goal_kcal = float(settings.get("goal_kcal", "2150"))
-    goal_p = float(settings.get("goal_protein", "185"))
-    goal_c = float(settings.get("goal_carbs", "200"))
-    goal_f = float(settings.get("goal_fat", "65"))
-    tdee = float(settings.get("profile_tdee", "3000"))
+    end_g = db.get_goals_for_date(conn, date_strs[-1])
+    goal_kcal = end_g["kcal"]
+    goal_p = end_g["protein"]
+    goal_c = end_g["carbs"]
+    goal_f = end_g["fat"]
+    tdee = end_g["tdee"]
 
     weights_rows = conn.execute(
         "SELECT date, kg FROM weights WHERE date >= ? AND date <= ? ORDER BY date",
@@ -1070,7 +1081,10 @@ def generate_meals_detail_pdf(conn, target_date=None, days_range=30, start_date=
     dates_with_entries = sorted(list(set(r["date"] for r in entries_rows)), reverse=True)
     total_kcal = sum(float(r["kcal"] or 0) for r in entries_rows)
     avg_kcal = (total_kcal / len(dates_with_entries)) if dates_with_entries else 0.0
-    total_deficit = sum(tdee - sum(float(e["kcal"] or 0) for e in entries_rows if e["date"] == d) for d in dates_with_entries)
+    total_deficit = sum(
+        db.get_goals_for_date(conn, d)["tdee"] - sum(float(e["kcal"] or 0) for e in entries_rows if e["date"] == d)
+        for d in dates_with_entries
+    )
 
     y_cards = pdf.get_y()
     card_w = 45
@@ -1133,7 +1147,8 @@ def generate_meals_detail_pdf(conn, target_date=None, days_range=30, start_date=
             day_p = sum(float(e["protein"] or 0) for e in d_entries)
             day_c = sum(float(e["carbs"] or 0) for e in d_entries)
             day_f = sum(float(e["fat"] or 0) for e in d_entries)
-            day_def = tdee - day_kcal
+            day_tdee = db.get_goals_for_date(conn, d_str)["tdee"]
+            day_def = day_tdee - day_kcal
             w_val = weights_by_date.get(d_str)
 
             if pdf.get_y() > 240:
